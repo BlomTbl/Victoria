@@ -36,7 +36,7 @@ class Victoria(object):
                     print('No solution defined for reservoir', emitter)
                     raise
             # Construct set of links unfilled links
-            link_list = [link for link in self.net.links]
+            link_list = [link for link in self.net.pipes]
             link_filled = self.solver.filled_links
             unfilled = set(link_list) - set(link_filled)
             # Fill links with standard solution
