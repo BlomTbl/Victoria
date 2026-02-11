@@ -1,0 +1,2 @@
+epynet>=0.2.0
+phreeqpython>=1.2.0

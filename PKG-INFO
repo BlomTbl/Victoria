@@ -1,0 +1,233 @@
+Metadata-Version: 2.1
+Name: victoria
+Version: 1.0.0
+Summary: Water Quality Simulator for Hydraulic Networks
+Home-page: 
+Author: Victoria Contributors
+Author-email: 
+License: MIT
+Project-URL: Documentation, 
+Project-URL: Source, 
+Project-URL: Bug Reports, 
+Keywords: water quality,hydraulic networks,PHREEQC,simulation,chemistry
+Classifier: Development Status :: 4 - Beta
+Classifier: Intended Audience :: Science/Research
+Classifier: Topic :: Scientific/Engineering :: Chemistry
+Classifier: Topic :: Scientific/Engineering :: Hydrology
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.7
+Classifier: Programming Language :: Python :: 3.8
+Classifier: Programming Language :: Python :: 3.9
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Requires-Python: >=3.7
+Description-Content-Type: text/markdown
+Provides-Extra: dev
+License-File: LICENSE
+
+# Victoria - Water Quality Simulator for Hydraulic Networks
+
+A Python package for simulating water quality in hydraulic distribution networks using PHREEQC chemistry coupled with EPyNet hydraulic simulation.
+
+## Features
+
+- **FIFO Parcel Tracking**: First In First Out water parcel tracking through pipes, pumps, and valves
+- **Multiple Mixing Models**: Support for different node types with appropriate mixing strategies
+  - Junctions: Ideal mixing
+  - Reservoirs: Source nodes
+  - Tanks: CSTR, FIFO, or LIFO models
+- **Water Chemistry**: Integration with PHREEQC for detailed water chemistry calculations
+- **EPyNet Compatible**: Works seamlessly with EPyNet hydraulic network models
+
+## Installation
+
+### From tar.gz file
+
+```bash
+pip install victoria-1.0.0.tar.gz
+```
+
+### From source
+
+```bash
+git clone <repository-url>
+cd victoria
+pip install -e .
+```
+
+## Requirements
+
+- Python >= 3.7
+- epynet >= 0.2.0
+- phreeqpython >= 1.2.0
+
+## Quick Start
+
+```python
+import epynet
+import phreeqpython
+from victoria import Victoria
+
+# Load hydraulic network
+network = epynet.Network('network.inp')
+
+# Initialize PHREEQC
+pp = phreeqpython.PhreeqPython()
+
+# Create Victoria simulator
+vic = Victoria(network, pp)
+
+# Define input solutions for each reservoir
+solutions = {
+    reservoir1: pp.add_solution({'Ca': 50, 'Cl': 100}),
+    reservoir2: pp.add_solution({'Ca': 30, 'Cl': 60}),
+}
+
+# Fill network with initial conditions
+vic.fill_network(solutions)
+
+# Run simulation loop
+simulation_hours = 24
+timestep = 3600  # 1 hour in seconds
+
+for hour in range(simulation_hours):
+    # Solve hydraulics for this timestep
+    network.solve()
+    
+    # Update water quality
+    vic.step(timestep=timestep, input_sol=solutions)
+    
+    # Query results
+    for node in network.junctions:
+        cl_conc = vic.get_conc_node(node, 'Cl', 'mg/L')
+        print(f"Hour {hour}, Node {node.uid}: Cl = {cl_conc:.2f} mg/L")
+```
+
+## Main Components
+
+### Victoria Class
+
+The main simulator class that coordinates hydraulic and water quality simulation.
+
+**Key Methods:**
+- `fill_network(input_sol)`: Initialize network with starting water quality
+- `step(timestep, input_sol)`: Simulate one timestep of water quality evolution
+- `check_flow_direction()`: Handle flow reversals
+- `get_conc_node(node, element, units)`: Get concentration at a node
+- `get_conc_pipe(link, element, units)`: Get concentration profile in a pipe
+- `get_properties_node(node)`: Get pH, conductivity, and temperature
+
+### Models
+
+Contains FIFO and MIX models for all network components:
+
+**FIFO Models** (for links):
+- `Pipe`: Water parcels flow through with volume
+- `Pump`: Instantaneous passage (zero volume)
+- `Valve`: Instantaneous passage (zero volume)
+
+**MIX Models** (for nodes):
+- `Junction`: Ideal mixing with demand
+- `Reservoir`: Source node
+- `Tank_CSTR`: Continuous stirred tank reactor
+- `Tank_FIFO`: First in first out tank
+- `Tank_LIFO`: Last in first out tank
+
+### Quality
+
+Handles water quality calculations and queries:
+- Concentration calculations using PHREEQC
+- Spatial and temporal averaging
+- Properties (pH, conductivity, temperature)
+
+### Solver
+
+Main calculation engine that traces water parcels through the network.
+
+## Advanced Usage
+
+### Custom Tank Models
+
+```python
+from victoria import Victoria, Models
+
+# Create Victoria instance
+vic = Victoria(network, pp)
+
+# Access specific tank and change model
+tank_id = 'T1'
+from victoria import Tank_LIFO
+vic.models.tanks[tank_id] = Tank_LIFO(maxvolume=1000)
+```
+
+### Handling Flow Reversals
+
+```python
+# After each hydraulic solve
+network.solve()
+vic.check_flow_direction()  # Update parcel positions for reversed flows
+vic.step(timestep=3600, input_sol=solutions)
+```
+
+### Memory Management
+
+For long simulations, periodically clean up unused PHREEQC solutions:
+
+```python
+# Every 24 hours or as needed
+vic.garbage_collect(input_sol=solutions)
+```
+
+## API Reference
+
+### Concentration Queries
+
+- `get_conc_node(node, element, units='mmol')`: Instantaneous concentration at node exit
+- `get_conc_node_avg(node, element, units='mmol')`: Time-averaged concentration at node
+- `get_conc_pipe(link, element, units='mmol')`: Concentration profile along pipe
+- `get_conc_pipe_avg(link, element, units='mmol')`: Volume-averaged concentration in pipe
+
+### Mixture Queries
+
+- `get_mixture_node(node)`: Solution mixture fractions at node (instantaneous)
+- `get_mixture_node_avg(node)`: Time-averaged solution mixture at node
+- `get_parcels(link)`: All parcels in a pipe with positions and qualities
+
+### Property Queries
+
+- `get_properties_node(node)`: [pH, conductivity, temperature] at node (instantaneous)
+- `get_properties_node_avg(node)`: Time-averaged properties at node
+
+## Units
+
+Supported concentration units:
+- `'mmol'`: millimoles per liter
+- `'mg/L'`: milligrams per liter
+- `'mol'`: moles per liter
+- `'ppm'`: parts per million (mass)
+
+## License
+
+See LICENSE file for details.
+
+## Contributing
+
+Contributions are welcome! Please feel free to submit a Pull Request.
+
+## Authors
+
+Victoria Contributors
+
+## Citation
+
+If you use Victoria in your research, please cite:
+
+```
+Victoria: Water Quality Simulator for Hydraulic Networks
+Version 1.0.0
+```
+
+## Support
+
+For issues and questions, please use the issue tracker.
