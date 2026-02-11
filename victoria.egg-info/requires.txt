@@ -1,0 +1,9 @@
+epynet>=0.2.0
+phreeqpython>=1.2.0
+
+[dev]
+black
+flake8
+mypy
+pytest-cov
+pytest>=6.0
