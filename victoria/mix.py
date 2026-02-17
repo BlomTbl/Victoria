@@ -178,14 +178,27 @@ class Reservoir(MIX):
         q = {input_sol[node.uid].number: 1.0}
         shift_volume = timestep * node.outflow / 3600
 
-        self.outflow = [[[shift_volume, q]]]
-
         self.mixed_parcels.append({
             'x0': 0.0,
             'x1': 1.0,
             'q': q,
             'volume': shift_volume
         })
+
+        # Bug fix: use parcels_out so outflow has one slot per downstream pipe.
+        # The original code set self.outflow = [[[shift_volume, q]]] directly,
+        # which hardcodes exactly one downstream link and breaks both
+        # fill_network (which reads outflow[i]) and multi-outlet reservoirs.
+        # parcels_out also correctly handles the zero-flow case by leaving
+        # outflow empty, which fill_network now guards against.
+        flows_out = [abs(link.flow) for link in _get_links(node, 'downstream')]
+        if flows_out:
+            self.parcels_out(flows_out)
+        else:
+            # Fallback for fill_network initialisation call where flow may be
+            # zero (timestep=60 s placeholder) — keep one slot so the caller
+            # can access outflow[0][0][1].
+            self.outflow = [[[shift_volume, q]]]
 
 
 class Tank_CSTR(MIX):
