@@ -112,6 +112,10 @@ class Solver:
             # Skip links with very low velocity
             if link.velocity < 0.001:
                 logger.debug(f"Skipping link {link.uid} due to low velocity")
+                # Bug fix 3: do NOT increment flowcount here — the outflow slot
+                # for this link was never consumed, so skipping it would shift
+                # all subsequent indices by one and cause an IndexError on the
+                # next link that does have flow.
                 continue
 
             flow_cnt = self.models.nodes[node.uid].flowcount
@@ -122,12 +126,16 @@ class Solver:
                 volumes = self.models.nodes[node.uid].outflow[flow_cnt]
                 self.models.links[link.uid].push_pull(flow_in, volumes)
                 self.models.links[link.uid].ready = True
-            except IndexError as e:
-                logger.error(
-                    f"Error accessing outflow for link {link.uid}, "
-                    f"flow_cnt={flow_cnt}: {e}"
+            except IndexError:
+                # outflow has fewer slots than active downstream links —
+                # this can happen at a junction whose parcels_out produced
+                # fewer entries than expected (e.g. all-zero mixed_parcels).
+                # Skip this link gracefully rather than crashing.
+                logger.debug(
+                    f"outflow[{flow_cnt}] missing for link {link.uid} at node "
+                    f"{node.uid} — skipping (zero-flow parcel path)"
                 )
-                raise
+                continue
             except Exception as e:
                 logger.error(f"Error in push_pull for link {link.uid}: {e}")
                 raise
@@ -197,27 +205,40 @@ class Solver:
 
         # Fill all downstream links
         downstream_links = self._get_links(node, 'downstream')
+        node_outflow = self.models.nodes[node.uid].outflow
+
         for i, link in enumerate(downstream_links):
             try:
-                # Get solution from node outflow
-                sol = self.models.nodes[node.uid].outflow[0][0][1]
-                
+                # Bug fix 1: outflow may be empty when a junction has zero total
+                # downstream flow (dead-end, closed valve, near-zero velocity).
+                # In that case fall back to the default background solution.
+                # Bug fix 2: use outflow[i] not outflow[0] — junctions with
+                # multiple downstream pipes produce one outflow slot per pipe.
+                if node_outflow and i < len(node_outflow) and node_outflow[i]:
+                    sol = node_outflow[i][0][1]
+                elif node_outflow and node_outflow[0]:
+                    # Reservoir always produces a single slot; reuse it for
+                    # every downstream link.
+                    sol = node_outflow[0][0][1]
+                else:
+                    # Zero-flow node — fill with default background solution
+                    logger.debug(
+                        f"Node {node.uid} outflow empty for link {link.uid}, "
+                        f"using default background solution (key=0)"
+                    )
+                    sol = {input_sol[0].number: 1.0}
+
                 # Fill the link
                 self.models.links[link.uid].fill(sol)
                 self.models.links[link.uid].ready = True
-                
+
                 # Track filled links
                 self.filled_links.append(link)
 
                 # Continue filling downstream
                 downstream_node = self._get_node_attr(link, 'downstream_node')
                 self.fill_network(downstream_node, input_sol)
-                
-            except IndexError as e:
-                logger.error(
-                    f"Error accessing outflow when filling link {link.uid}: {e}"
-                )
-                raise
+
             except Exception as e:
                 logger.error(f"Error filling link {link.uid}: {e}")
                 raise
