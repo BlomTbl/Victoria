@@ -1,276 +1,462 @@
-# victoria/fifo.py
+# Victoria Water Quality Simulator Documentation
 
-The **FIFO** module implements **First In, First Out** tracking of water parcels through hydraulic links. It defines the fundamental data structures and operations for pipes, pumps, and valves.
-
-- **Parcel**: A small volume of water with positional (`x0`, `x1`) and quality (`q`) attributes.
-- **FIFO**: Base class managing parcel insertion, shifting, reversal, and readiness state.
-- Supports:
-  - **connections**: linking upstream/downstream nodes
-  - **reverse_parcels**: handling flow direction changes
-  - **push_in**: recursively adding incoming parcels
-  - **state/output_state**: internal and outgoing parcel lists
-
-```python
-@dataclass
-class Parcel:
-    x0: float
-    x1: float
-    q: Dict[int, float]
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {'x0': self.x0, 'x1': self.x1, 'q': self.q}
-
-class FIFO:
-    def __init__(self, volume: float = 0.0):
-        self.volume = volume
-        self.state: List[Dict[str, Any]] = []
-        self.output_state: List[Dict[str, Any]] = []
-        self.ready = False
-        self.downstream_node = None
-        self.upstream_node = None
-
-    def connections(self, downstream: Any, upstream: Any) -> None:
-        self.downstream_node = downstream
-        self.upstream_node = upstream
-
-    def reverse_parcels(self, downstream: Any, upstream: Any) -> None:
-        reversed_state = []
-        for parcel in self.state:
-            reversed_state.append({
-                'x0': 1 - parcel['x1'],
-                'x1': 1 - parcel['x0'],
-                'q': parcel['q']
-            })
-        self.state = sorted(reversed_state, key=lambda p: p['x1'])
-        self.downstream_node = downstream
-        self.upstream_node = upstream
-
-    def push_in(self, volumes: List[List[Any]]) -> None:
-        if not volumes:
-            return
-        v, q = volumes[-1]
-        if self.volume <= 0:
-            volumes.pop()
-            if volumes:
-                self.push_in(volumes)
-            return
-        fraction = v / self.volume
-        self.state = [
-            {'x0': s['x0'] + fraction, 'x1': s['x1'] + fraction, 'q': s['q']}
-            for s in self.state
-        ]
-        # Merging or prepending new parcel omitted for brevity
-```
+Victoria is a Python package for simulating water quality in hydraulic distribution networks. It couples PHREEQC-based water chemistry with EPyNet hydraulic simulations, enabling detailed tracking of chemical constituents and mixtures as water moves through pipes, pumps, valves, and storage tanks.
 
 ---
 
-# victoria/mix.py
+## `mix.py` – Mixing Strategies for Nodes
 
-The **MIX** module provides **mixing strategies** at network nodes. It defines how incoming parcels combine and distribute across outgoing links.
+This module implements mixing models for hydraulic network nodes—junctions, reservoirs, and tanks. It provides several physical models for water parcel mixing, allowing flexible simulation according to real-world behavior.
 
-- **_get_links**: Unified access to `upstream_links`/`downstream_links` (method or property).
-- **MIX (base class)**:
-  - `merge_load`: weight‐merge two quality dictionaries
-  - `parcels_out`: allocate mixed parcels by flow rates
-- **Node models**:
-  - **Junction**: ideal mixing with demand
-  - **Reservoir**: source node, passes inflow unchanged
-  - **Tank_CSTR**: continuous stirred tank reactor
-  - **Tank_FIFO**, **Tank_LIFO**: first‐in‐first‐out or last‐in‐first‐out stratified tanks
+### Key Classes and Functions
 
-```python
-class MIX:
-    def __init__(self):
-        self.sorted_parcels: List[Dict[str, Any]] = []
-        self.outflow: List[List[List[Any]]] = []
-        self.mixed_parcels: List[Dict[str, Any]] = []
+| Class        | Purpose                                                         |
+|--------------|-----------------------------------------------------------------|
+| `MIX`        | Base class for mixing parcels at nodes.                         |
+| `Junction`   | Ideal mixing at junctions, considers demand and inflow parcels. |
+| `Reservoir`  | Reservoir node as a constant source; supplies parcels directly. |
+| `Tank_CSTR`  | Tank as a Continuous Stirred Tank Reactor (full mixing).        |
+| `Tank_LIFO`  | Tank as Last-In-First-Out (stratified, newest on top).          |
+| `Tank_FIFO`  | Tank as First-In-First-Out (oldest leaves first).               |
 
-    @staticmethod
-    def merge_load(dict1: Dict, dict2: Dict, volume: float) -> Dict:
-        result = dict1.copy()
-        for key, val in dict2.items():
-            result[key] = result.get(key, 0) + val * volume
-        return result
+#### MIX (Base Class)
 
-    def parcels_out(self, flows_out: List[float]) -> None:
-        self.outflow = []
-        total = sum(flows_out)
-        if total <= 1e-7:
-            return
-        for flow in flows_out:
-            temp = []
-            for parcel in self.mixed_parcels:
-                vol = (parcel['x1'] - parcel['x0']) * flow / total * parcel['volume']
-                temp.append([round(vol, 6), parcel['q']])
-            self.outflow.append(temp)
+- **merge_load**: Merges two solution dictionaries by volume.
+- **parcels_out**: Distributes mixed parcels to outgoing links based on flows.
 
-class Junction(MIX):
-    def mix(self, inflow: List[Dict[str, Any]], node: Any,
-            timestep: float, input_sol: Any) -> None:
-        # Sort by position, apply demand, merge loads, then parcels_out
-        pass
-```
+#### Junction
 
----
+- **mix**: Merges inflow parcels, subtracts demand, and prepares outflow for each downstream link.
 
-# victoria/models.py
+#### Reservoir
 
-The **Models** module auto‐creates and manages **model instances** for every network component, linking EPyNet objects to FIFO/MIX behavior.
+- **mix**: Generates new solution parcels based on reservoir's outflow and upstream chemical input.
 
-- **load_links**: for each `pipe`, `pump`, `valve` in the network, instantiate corresponding FIFO model (`Pipe`, `Pump`, `Valve`).
-- **load_nodes**: for each `junction`, `reservoir`, `tank`, assign a MIX model (`Junction`, `Reservoir`, `Tank_CSTR` by default).
-- **get_node_model** / **get_link_model**: lookup functions raising `KeyError` if not found.
+#### Tank_CSTR
 
-| Network Element | Model Class      | Storage Dict       |
-| --------------- | ---------------- | ------------------ |
-| Pipes           | `Pipe`           | `self.pipes`       |
-| Pumps           | `Pump`           | `self.pumps`       |
-| Valves          | `Valve`          | `self.valves`      |
-| Junctions       | `Junction`       | `self.junctions`   |
-| Reservoirs      | `Reservoir`      | `self.reservoirs`  |
-| Tanks           | `Tank_CSTR`      | `self.tanks`       |
+- **mix**: Implements ideal mixing using an exponential decay model in tank.
+- Retains previous mixture, calculates new mixture based on inflow and tank volume.
 
-```python
-class Models:
-    def __init__(self, network: Any):
-        self.nodes = {}
-        self.pipes = {}
-        self.links = {}
-        self.load_links(network)
-        self.load_nodes(network)
+#### Tank_LIFO
 
-    def load_links(self, network: Any) -> None:
-        for pipe in network.pipes:
-            vol = 0.25 * math.pi * pipe.length * (pipe.diameter * 1e-3)**2
-            self.pipes[pipe.uid] = Pipe(volume=vol)
-            self.links[pipe.uid] = self.pipes[pipe.uid]
-        # Similar for pumps and valves...
-```
+- **mix**: Stratifies parcels so that the most recent inflow is at the top; parcels leave in a LIFO order.
 
----
+#### Tank_FIFO
 
-# victoria/quality.py
+- **mix**: Maintains parcel entry order; oldest parcels exit first (FIFO).
 
-The **Quality** module handles **water chemistry** calculations, using PHREEQC to mix solutions and compute concentrations and properties.
-
-- **get_parcels**: retrieves current parcels in a pipe.
-- **get_conc_node / get_conc_node_avg**: instantaneous and time‐averaged concentration at a node.
-- **get_mixture_node / get_mixture_node_avg**: solution fraction mappings (instant and averaged).
-- **get_conc_pipe / get_conc_pipe_avg**: concentration profile and volume‐averaged concentration in a pipe.
-- **get_properties_node / get_properties_node_avg**: pH, conductivity, temperature at node exit.
-
-```python
-class Quality:
-    def __init__(self, pp: Any, models: Any):
-        self.pp = pp
-        self.models = models
-
-    def get_conc_node(self, node: Any, element: str, units: str = 'mmol') -> float:
-        node_model = self.models.nodes.get(node.uid)
-        if not node_model or not node_model.mixed_parcels:
-            return 0.0
-        parcel = node_model.mixed_parcels[0]
-        return self._calculate_concentration(parcel['q'], element, units)
-
-    def _calculate_concentration(self, sol_dict: Dict[int, float],
-                                 element: str, units: str) -> float:
-        mixture = self._mix_phreeqc_solutions(sol_dict)
-        return mixture.total(element, units) if mixture else 0.0
-```
-
----
-
-# victoria/solver.py
-
-The **Solver** module traces **water parcels** through the network based on hydraulic results.
-
-- **_get_links / _get_node_attr**: compatibility layers for EPyNet API differences.
-- **run_trace**: recursively mixes outflow from upstream links at each node.
-- **fill_network**: seeds the network with initial solutions from reservoirs.
-- **reset_ready_state**: clears link readiness for the next timestep.
-
-```python
-class Solver:
-    def __init__(self, models: Any, network: Any):
-        self.models = models
-        self.net = network
-        self.filled_links = []
-
-    def _get_links(self, node: Any, direction: str) -> list:
-        links = getattr(node, f'{direction}_links')
-        return links() if callable(links) else links
-
-    def run_trace(self, node: Any, timestep: float, input_sol: Any) -> None:
-        upstream = self._get_links(node, 'upstream')
-        if not all(self.models.links[l.uid].ready for l in upstream):
-            return
-        inflow = sum((self.models.links[l.uid].output_state for l in upstream), [])
-        self.models.nodes[node.uid].mix(inflow, node, timestep, input_sol)
-        # Mark downstream links ready omitted for brevity
-
-    def fill_network(self, emitter: Any, input_sol: Any) -> None:
-        # Recursive filling logic omitted for brevity
-        pass
-```
-
----
-
-# victoria/victoria.py 🚀
-
-The **Victoria** class provides the **high-level API**, orchestrating:
-
-- **Models**: linking EPyNet components to simulation models
-- **Solver**: tracing parcels
-- **Quality**: computing chemistry
-
-Main methods:
-
-- **__init__(network, pp)**: set up `Models`, `Solver`, `Quality`.
-- **fill_network(input_sol, from_reservoir=True)**: initialize all pipes with starting solutions.
-- **step(timestep, input_sol)**: perform one quality simulation step; must follow hydraulic solve.
-- **check_flow_direction()**: adapt to flow reversals across all links.
-- **garbage_collect(input_sol)**: clean up unused PHREEQC solutions.
-
-```python
-class Victoria:
-    def __init__(self, network: Any, pp: Any):
-        self.net = network
-        self.pp = pp
-        self.models = Models(network)
-        self.solver = Solver(self.models, network)
-        self.quality = Quality(pp, self.models)
-
-    def fill_network(self, input_sol: Dict, from_reservoir: bool = True) -> None:
-        if from_reservoir:
-            for res in self.net.reservoirs:
-                self.solver.fill_network(res, input_sol)
-        else:
-            # Fill all pipes with background solution
-            pass
-
-    def step(self, timestep: float, input_sol: Dict) -> None:
-        if timestep <= 0:
-            raise ValueError("Timestep must be positive")
-        for res in self.net.reservoirs:
-            self.solver.run_trace(res, timestep, input_sol)
-        self.solver.reset_ready_state()
-```
-
----
-
-## Module Interaction Overview
+### Mixing Model Class Architecture
 
 ```mermaid
-flowchart TD
-    Vit[Victoria] --> Mod[Models]
-    Vit --> Sol[Solver]
-    Vit --> Qual[Quality]
-    Mod --> FIFO[FIFO Module]
-    Mod --> MIX[MIX Module]
-    Sol --> Mod
-    Qual --> Mod
-    Vit --> PP[PhreeqPython]
-    Vit --> Net[EPyNet Network]
+classDiagram
+    class MIX {
+        +merge_load(dict1, dict2, volume)
+        +parcels_out(flows_out)
+    }
+    class Junction {
+        +mix(inflow, node, timestep, input_sol)
+    }
+    class Reservoir {
+        +mix(inflow, node, timestep, input_sol)
+    }
+    class Tank_CSTR {
+        +mix(inflow, node, timestep, input_sol)
+    }
+    class Tank_LIFO {
+        +mix(inflow, node, timestep, input_sol)
+    }
+    class Tank_FIFO {
+        +mix(inflow, node, timestep, input_sol)
+    }
+    MIX <|-- Junction
+    MIX <|-- Reservoir
+    MIX <|-- Tank_CSTR
+    MIX <|-- Tank_LIFO
+    MIX <|-- Tank_FIFO
 ```
 
-This flowchart shows how **Victoria** orchestrates the **Models**, **Solver**, and **Quality** components, which in turn depend on the underlying **FIFO** and **MIX** modules, as well as external **Epynet** and **PHREEQC** engines.
+---
+
+## `fifo.py` – FIFO Parcel Tracking for Links
+
+This module models pipes, pumps, and valves using a First-In-First-Out (FIFO) approach for water parcels.
+
+### Core Components
+
+| Class    | Description                                                              |
+|----------|--------------------------------------------------------------------------|
+| `Parcel` | Represents a water parcel (position and chemical quality).               |
+| `FIFO`   | Base class for links supporting FIFO water parcel tracking.              |
+| `Pipe`   | Models a pipe; moves parcels according to flow, pushes/pulls parcels.    |
+| `Pump`   | Models a pump (zero-length, instantaneous passage of parcels).           |
+| `Valve`  | Models a valve (zero-length, instantaneous passage of parcels).          |
+
+#### FIFO (Base Class)
+
+- **push_in(volumes)**: Pushes inflow parcels into the link, shifting existing parcels.
+- **reverse_parcels**: Reverses parcel positions if flow reverses.
+- **connections**: Sets upstream and downstream node connections.
+
+#### Pipe
+
+- **push_pull(flow, volumes)**: Pushes parcels in based on inflow, calculates exited parcels.
+- **fill(input_sol)**: Fills the pipe with a uniform solution.
+
+#### Pump & Valve
+
+- **push_pull(flow, volumes)**: Passes inflow parcels directly to outflow, no storage.
+- **fill(input_sol)**: Initializes with a solution (for initial condition).
+
+### FIFO Link Class Architecture
+
+```mermaid
+classDiagram
+    class FIFO {
+        +connections(downstream, upstream)
+        +reverse_parcels(downstream, upstream)
+        +push_in(volumes)
+    }
+    class Pipe {
+        +push_pull(flow, volumes)
+        +fill(input_sol)
+    }
+    class Pump {
+        +push_pull(flow, volumes)
+        +fill(input_sol)
+    }
+    class Valve {
+        +push_pull(flow, volumes)
+        +fill(input_sol)
+    }
+    FIFO <|-- Pipe
+    FIFO <|-- Pump
+    FIFO <|-- Valve
+```
+
+---
+
+## `models.py` – Network Model Construction
+
+This module organizes the hydraulic network into node and link models, preparing the entire network for simulation.
+
+### Main Class: `Models`
+
+- **Purpose:** Maintains all nodes and links, creating the correct mixing (MIX) and FIFO models for every network component.
+- **Key attributes:** 
+  - `nodes`, `links`: Dictionaries of all nodes/links.
+  - `junctions`, `reservoirs`, `tanks`, `pipes`, `pumps`, `valves`: Typed dictionaries.
+
+### Functions
+
+- **__init__(network):** Scans network, creates models for each node and link.
+- **load_nodes(network):** Builds node models (Junction, Reservoir, Tank).
+- **load_links(network):** Builds link models (Pipe, Pump, Valve).
+- **get_node_model(node_uid):** Retrieves a node model by unique ID.
+- **get_link_model(link_uid):** Retrieves a link model by unique ID.
+
+---
+
+## `quality.py` – Water Quality Calculation
+
+Handles mixing of PHREEQC solutions and retrieves concentration/properties at nodes and pipes.
+
+### Main Class: `Quality`
+
+| Method                  | Description                                                             |
+|-------------------------|-------------------------------------------------------------------------|
+| `get_parcels(link)`     | Returns all parcels in a pipe.                                          |
+| `get_conc_node(node, element, units)` | Instantaneous concentration at node exit.             |
+| `get_conc_node_avg(node, element, units)` | Time-averaged concentration at node.             |
+| `get_mixture_node(node)` | Solution mixture fractions at node exit (instantaneous).               |
+| `get_mixture_node_avg(node)` | Time-averaged solution mixture at node.                         |
+| `get_conc_pipe(link, element, units)` | Concentration profile along a pipe.                   |
+| `get_conc_pipe_avg(link, element, units)` | Volume-averaged concentration in a pipe.         |
+| `get_properties_node(node)`           | pH, conductivity, temperature at node (instant).      |
+| `get_properties_node_avg(node)`       | Time-averaged water properties at node.               |
+
+#### Chemistry Handling
+
+- Solution mixing leverages the PHREEQC Python interface.
+- Chemistry is calculated by merging solution dictionaries and invoking PHREEQC's mix and total methods.
+
+---
+
+## `solver.py` – Water Quality Calculation Loop
+
+The solver implements the main algorithm for tracking water parcels through the network according to hydraulic simulation results.
+
+### Main Class: `Solver`
+
+| Method                     | Description                                                        |
+|----------------------------|--------------------------------------------------------------------|
+| `run_trace(node, timestep, input_sol)` | Traces water parcels recursively from a node.         |
+| `check_connections()`      | Checks for flow reversals, reverses parcels if needed.             |
+| `fill_network(node, input_sol)` | Fills the network from a source node with initial solutions. |
+| `reset_ready_state()`      | Resets all links' ready state for next simulation step.             |
+
+#### Key Features
+
+- Recursively tracks the movement and mixing of water parcels node-to-node, link-to-link.
+- Handles flow reversals and ensures parcels are reversed when flow direction changes.
+- Fills the network with initial conditions before time-stepping begins.
+
+---
+
+## `victoria.py` – High-Level Simulation API
+
+This is the main module providing the user-facing API for water quality simulation.
+
+### Main Class: `Victoria`
+
+#### Initialization
+
+```python
+import epynet
+import phreeqpython
+from victoria import Victoria
+
+network = epynet.Network('network.inp')
+pp = phreeqpython.PhreeqPython()
+vic = Victoria(network, pp)
+```
+
+#### Core Methods
+
+| Method                     | Description                                                      |
+|----------------------------|------------------------------------------------------------------|
+| `step(timestep, input_sol)`| Advances water quality simulation by one timestep.               |
+| `fill_network(input_sol, from_reservoir=True)` | Fills network with initial solutions.      |
+| `check_flow_direction()`   | Updates internal state if flow directions change.                |
+| `garbage_collect(input_sol=None)` | Removes unused PHREEQC solutions from memory.             |
+| `get_conc_node(node, element, units='mmol')` | Instantaneous concentration at node exit.   |
+| `get_conc_node_avg(node, element, units='mmol')` | Time-averaged concentration at node.    |
+| `get_mixture_node(node)`   | Instantaneous solution mixture at node exit.                     |
+| `get_mixture_node_avg(node)` | Time-averaged solution mixture at node exit.                  |
+| `get_conc_pipe(link, element, units='mmol')` | Concentration profile along a pipe.         |
+| `get_conc_pipe_avg(link, element, units='mmol')` | Volume-averaged concentration in pipe.   |
+| `get_parcels(link)`        | All parcels in a pipe with position and quality.                 |
+| `get_properties_node(node)` | pH, conductivity, temperature at node (instantaneous).          |
+| `get_properties_node_avg(node)` | Time-averaged water properties at node.                  |
+
+---
+
+### Example Usage
+
+```python
+import epynet
+import phreeqpython
+from victoria import Victoria
+
+# Load network and chemistry
+network = epynet.Network('network.inp')
+pp = phreeqpython.PhreeqPython()
+
+# Create simulator
+vic = Victoria(network, pp)
+
+# Define input PHREEQC solutions (node UID -> solution object)
+solutions = {...}
+vic.fill_network(solutions)
+
+# Advance simulation
+for t in range(sim_steps):
+    network.solve()  # Solve hydraulics for current step
+    vic.step(timestep=3600, input_sol=solutions)  # One hour step
+
+# Query node concentration
+conc = vic.get_conc_node(node, 'Cl', 'mg/L')
+```
+
+---
+
+## `__init__.py` – Package Initialization
+
+This file initializes the package and exposes the main classes:
+
+```python
+from .victoria import Victoria
+from .models import Models
+from .solver import Solver
+from .quality import Quality
+from .fifo import FIFO, Pipe, Pump, Valve
+from .mix import MIX, Junction, Reservoir, Tank_CSTR, Tank_FIFO, Tank_LIFO
+
+__all__ = [
+    'Victoria', 'Models', 'Solver', 'Quality',
+    'FIFO', 'Pipe', 'Pump', 'Valve',
+    'MIX', 'Junction', 'Reservoir', 'Tank_CSTR', 'Tank_FIFO', 'Tank_LIFO',
+]
+```
+
+---
+
+# API Endpoint Documentation
+
+The Victoria package does **not** define HTTP API endpoints. Instead, it exposes a Python API with methods for simulation and querying. The following blocks describe the API methods and their usage.
+
+---
+
+## `Victoria.step` – Simulate One Timestep
+
+### Advance Water Quality by One Timestep
+
+```api
+{
+    "title": "Simulate One Timestep",
+    "description": "Advance the water quality simulation by one timestep, updating water parcel chemistry according to hydraulic results.",
+    "method": "python",
+    "baseUrl": "victoria.Victoria",
+    "endpoint": "step",
+    "headers": [],
+    "queryParams": [],
+    "pathParams": [],
+    "bodyType": "json",
+    "requestBody": "vic.step(timestep=3600, input_sol=solutions)",
+    "formData": [],
+    "responses": {
+        "None": {
+            "description": "Simulation step completed."
+        }
+    }
+}
+```
+
+---
+
+## `Victoria.fill_network` – Initialize the Network
+
+### Fill Network With Initial Solutions
+
+```api
+{
+    "title": "Fill Network",
+    "description": "Initialize the distribution network with starting water quality solutions.",
+    "method": "python",
+    "baseUrl": "victoria.Victoria",
+    "endpoint": "fill_network",
+    "headers": [],
+    "queryParams": [],
+    "pathParams": [],
+    "bodyType": "json",
+    "requestBody": "vic.fill_network(input_sol=solutions, from_reservoir=True)",
+    "formData": [],
+    "responses": {
+        "None": {
+            "description": "Network initialized with initial water quality."
+        }
+    }
+}
+```
+
+---
+
+## `Victoria.get_conc_node` – Query Node Concentration
+
+### Get Instantaneous Concentration at Node
+
+```api
+{
+    "title": "Get Node Concentration",
+    "description": "Retrieve the instantaneous concentration of a chemical at a specific network node.",
+    "method": "python",
+    "baseUrl": "victoria.Victoria",
+    "endpoint": "get_conc_node",
+    "headers": [],
+    "queryParams": [],
+    "pathParams": [],
+    "bodyType": "json",
+    "requestBody": "vic.get_conc_node(node, 'Cl', 'mg/L')",
+    "formData": [],
+    "responses": {
+        "float": {
+            "description": "Concentration value at the specified node."
+        }
+    }
+}
+```
+
+---
+
+## `Victoria.get_conc_pipe` – Query Pipe Concentration Profile
+
+### Get Concentration Profile Along Pipe
+
+```api
+{
+    "title": "Get Pipe Concentration Profile",
+    "description": "Retrieve the concentration profile of a chemical along the length of a pipe.",
+    "method": "python",
+    "baseUrl": "victoria.Victoria",
+    "endpoint": "get_conc_pipe",
+    "headers": [],
+    "queryParams": [],
+    "pathParams": [],
+    "bodyType": "json",
+    "requestBody": "vic.get_conc_pipe(pipe, 'Ca', 'mg/L')",
+    "formData": [],
+    "responses": {
+        "list": {
+            "description": "List of parcel dictionaries with position and concentration."
+        }
+    }
+}
+```
+
+---
+
+## `Victoria.garbage_collect` – Free Unused PHREEQC Solutions
+
+### Remove Unused Solutions from Memory
+
+```api
+{
+    "title": "Garbage Collect Solutions",
+    "description": "Remove unused PHREEQC solutions from memory to prevent resource buildup.",
+    "method": "python",
+    "baseUrl": "victoria.Victoria",
+    "endpoint": "garbage_collect",
+    "headers": [],
+    "queryParams": [],
+    "pathParams": [],
+    "bodyType": "json",
+    "requestBody": "vic.garbage_collect(input_sol=solutions)",
+    "formData": [],
+    "responses": {
+        "None": {
+            "description": "Unused solutions removed from PHREEQC."
+        }
+    }
+}
+```
+
+---
+
+# Usage Notes
+
+- **Nodes and links** are referenced by their unique IDs.
+- **Input solutions** must be PHREEQC solution objects, referenced by node UID.
+- Use **`step`** after each hydraulic time step to update water quality.
+- Use **`get_...` methods** to query simulation results for nodes and pipes at any time.
+- The **garbage collection** function is recommended for long simulations to manage memory.
+
+---
+
+```card
+{
+    "title": "Hydraulics Must Be Solved First",
+    "content": "Call the Victoria step() method only after solving the hydraulic network for the current timestep."
+}
+```
+
+---
+
+```card
+{
+    "title": "Initial Conditions Required",
+    "content": "Always call fill_network() before starting a simulation to set initial water quality conditions."
+}
+```
+
+---
+
+This documentation covers the structure, API, and usage patterns for Victoria, facilitating accurate and efficient water quality simulation in hydraulic distribution networks.
