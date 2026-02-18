@@ -1,5 +1,3 @@
-**mix.py**
-```python
 """
 MIX module for mixing water parcels at nodes.
 
@@ -405,19 +403,4 @@ class Tank_FIFO(MIX):
         self.mixed_parcels = output
         self.state = new_state
         self.parcels_out(flows_out)
-```
-
----
-
-**Summary of Key Optimizations:**
-
-- **Extraction of Utility Functions:** Repeated rounding logic on dictionaries has been centralized in `_round_dict_values`, and position-shifting/scaling for tank states is now handled by `_shift_state` and `_shift_and_scale_state` methods for DRYness.
-- **Consistent Naming and Type Annotations:** All variable and function names are clarified for readability, and type hints are consistent.
-- **Method Extraction and Branch Reduction:** Common logic (e.g., parcel shifting in tanks, normalization of mixtures) is clearly extracted and duplicated logic reduced.
-- **Early Returns and Logic Simplification:** Early returns for trivial cases (e.g., no inflow, zero flow) reduce indentation and clarify code structure.
-- **Dict Getters Used for Defaults:** More idiomatic `.get()` is used for dictionary key access with defaults.
-- **Division-by-Zero Guarding:** All geometric/volume calculations are safeguarded against division by zero.
-- **Python Idioms:** Use of comprehensions for state adjustments, `enumerate` replaced with direct iteration when indices unused, list appending is simplified.
-- **Comment Clarity:** Only meaningful comments are preserved or clarified, and verbose or redundant ones are reduced.
-
-The code preserves the **exact same API and behavior** and is **backward compatible**, but is now much more maintainable and readable for future extension or debugging.
+        
