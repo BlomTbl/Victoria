@@ -256,7 +256,7 @@ class Quality:
             # are unaffected as this only applies to post-processing queries.
             err_str = str(e)
             if "oxygen" in err_str.lower() or "converged" in err_str.lower():
-                logger.debug(f"PHREEQC oxygen convergence issue (non-fatal, returning None): {e}")
+                logger.debug(f"PHREEQC oxygen convergence issue (non-fatal): {e}")
             else:
                 logger.error(f"Error mixing PHREEQC solutions: {e}")
             return None
