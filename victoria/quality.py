@@ -250,5 +250,13 @@ class Quality:
                 logger.warning(f"No valid solutions found to mix from {solution_dict}")
                 return None
         except Exception as e:
-            logger.error(f"Error mixing PHREEQC solutions: {e}")
+            # PHREEQC oxygen mass convergence warnings are non-fatal and occur
+            # frequently when mixing solutions with near-zero dissolved oxygen.
+            # Log at DEBUG level to avoid flooding output; simulation results
+            # are unaffected as this only applies to post-processing queries.
+            err_str = str(e)
+            if "oxygen" in err_str.lower() or "converged" in err_str.lower():
+                logger.debug(f"PHREEQC oxygen convergence issue (non-fatal, returning None): {e}")
+            else:
+                logger.error(f"Error mixing PHREEQC solutions: {e}")
             return None
