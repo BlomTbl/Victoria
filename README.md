@@ -102,20 +102,6 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 Made with ❤️ by the Victoria Contributors
 
-Cover image for DeepWiki: Complete Guide + Hacks
-Rishabh Singh
-Rishabh Singh
 
-Posted on 11 mei 2025 • Edited on 5 nov 2025
-4
-DeepWiki: Complete Guide + Hacks
-#github
-#ai
-#productivity
-#opensource
-Introduction
-
-
-#career #learning #ai #programmers
 
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/BlomTbl/victoria)
