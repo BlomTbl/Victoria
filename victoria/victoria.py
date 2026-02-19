@@ -9,6 +9,7 @@ import logging
 from .solver import Solver
 from .quality import Quality
 from .models import Models
+from .segmentation import PipeSegmentation
 
 logger = logging.getLogger(__name__)
 
@@ -204,3 +205,102 @@ class Victoria:
     def get_properties_node_avg(self, node: Any) -> List[float]:
         """Get time-averaged water properties at node exit."""
         return self.quality.get_properties_node_avg(node)
+
+    # ========== Pipe Segmentation Methods ==========
+
+    def segmentation(self, seg_length_m: float = 6.0) -> 'PipeSegmentation':
+        """
+        Create a PipeSegmentation helper bound to this Victoria instance.
+
+        The returned object can be used to compute fixed-length segment
+        concentrations for individual pipes or the entire network, and
+        to record segment-level time-series during a simulation loop.
+
+        Parameters
+        ----------
+        seg_length_m : float
+            Physical length of each segment in metres (default 6.0 m).
+
+        Returns
+        -------
+        PipeSegmentation
+            A new, empty segmentation recorder bound to *self*.
+
+        Example
+        -------
+        ::
+
+            seg = model.segmentation(seg_length_m=10.0)
+
+            for step, mult in enumerate(demand_mults):
+                net.solve()
+                model.step(timestep, input_sol)
+                seg.record_step(net, species='Ca', units='mg',
+                                time_s=(step + 1) * timestep, step=step + 1)
+
+            df_ts = seg.to_dataframe()   # full time-series DataFrame
+        """
+        return PipeSegmentation(self, seg_length_m=seg_length_m)
+
+    def segment_pipe(
+        self,
+        pipe: Any,
+        species: str,
+        units: str = 'mg',
+        seg_length_m: float = 6.0,
+    ) -> List[Dict]:
+        """
+        Compute concentration for every fixed-length segment of one pipe.
+
+        Convenience wrapper around :class:`PipeSegmentation` for one-off
+        queries without needing to instantiate the helper explicitly.
+
+        Parameters
+        ----------
+        pipe : epynet pipe object
+            Must expose ``.uid`` and ``.length``.
+        species : str
+            Chemical element / species name (e.g. ``'Ca'``).
+        units : str
+            Concentration units (e.g. ``'mg'``, ``'mmol'``).
+        seg_length_m : float
+            Physical segment length in metres (default 6.0 m).
+
+        Returns
+        -------
+        list of dict
+            See :meth:`PipeSegmentation.segment_pipe` for the full schema.
+        """
+        return PipeSegmentation(self, seg_length_m).segment_pipe(pipe, species, units)
+
+    def segment_network(
+        self,
+        network: Any,
+        species: str,
+        units: str = 'mg',
+        seg_length_m: float = 6.0,
+    ) -> 'pd.DataFrame':
+        """
+        Segment all pipes in *network* and return a tidy DataFrame.
+
+        Convenience wrapper around :class:`PipeSegmentation` for one-off
+        snapshots of the entire network at the current simulation state.
+
+        Parameters
+        ----------
+        network : epynet Network
+            Used to iterate over ``network.pipes``.
+        species : str
+            Chemical element / species name.
+        units : str
+            Concentration units.
+        seg_length_m : float
+            Physical segment length in metres (default 6.0 m).
+
+        Returns
+        -------
+        pandas.DataFrame
+            Columns: ``pipe``, ``seg_id``, ``x_start_m``, ``x_end_m``,
+            ``x_mid_m``, ``length_m``, ``conc``, ``n_parcels``.
+        """
+        return PipeSegmentation(self, seg_length_m).segment_network(network, species, units)
