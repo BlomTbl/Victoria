@@ -70,7 +70,7 @@ Victoria Contributors
 
 setup(
     name='victoria',
-    version='1.0.0',
+    version='1.1.0',
     author='Victoria Contributors',
     author_email='',
     description='Water Quality Simulator for Hydraulic Networks',
