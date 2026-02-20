@@ -364,7 +364,7 @@ from phreeqpython import PhreeqPython
 from victoria import Victoria
 
 # ── Network setup ─────────────────────────────────────────────────────────────
-network = epynet.Network('trapo.inp')
+network = epynet.Network('pulse1.inp')
 network.solve()
 
 pp = PhreeqPython()
