@@ -74,16 +74,19 @@ class Victoria:
         logger.info("Filling network with initial solutions")
 
         def _get_default_solution(input_sol):
-            try:
-                # Assume input_sol is keyed by either node or integer with .number property
-                sol = input_sol[0]
-                return {sol.number: 1.0}
-            except KeyError:
-                logger.error("No initial solution defined for key=0")
-                raise
-            except AttributeError as e:
-                logger.error(f"Invalid solution object: {e}")
-                raise
+            # Prefer integer key 0 for backward compatibility, but fall back to
+            # the first available solution object if key 0 is absent.
+            # This avoids errors when input_sol only uses node-uid string keys.
+            candidate = input_sol.get(0, None)
+            if candidate is None:
+                for v in input_sol.values():
+                    if hasattr(v, 'number'):
+                        candidate = v
+                        break
+            if candidate is None:
+                logger.error("No solution object found in input_sol for default fill")
+                raise KeyError("No valid solution object in input_sol")
+            return {candidate.number: 1.0}
 
         if from_reservoir:
             for emitter in self.net.reservoirs:
@@ -95,7 +98,7 @@ class Victoria:
 
             # Fill remaining unfilled links with default solution
             link_list = {link.uid for link in self.net.links}
-            filled_links = {link.uid for link in self.solver.filled_links}
+            filled_links = set(self.solver.filled_links)
             unfilled_uids = link_list - filled_links
 
             if unfilled_uids:
