@@ -411,7 +411,7 @@ segs = seg.segment_pipe(pipe, 'Ca', 'mg')
 | `conc` | `float` | Length-weighted average concentration. |
 | `n_parcels` | `int` | Number of FIFO parcels overlapping this segment. |
 
-Returns `[]` when the pipe has zero length, no parcel data is available, or `seg_length_m ≤ 0`.
+Returns `[]` when the pipe has zero length or no parcel data is available. (A `seg_length_m ≤ 0` value cannot occur at this point — the constructor raises `ValueError` first.)
 
 ---
 
@@ -677,7 +677,7 @@ m = Models(network)
 
 `get_link_model(uid)` → link model. Raises `KeyError` if not found.
 
-`Models._calculate_pipe_volume(length_m, diameter_mm)` → `float` — static helper: `π/4 × L × D²`.
+`Models._calculate_pipe_volume(length_m, diameter_mm)` → `float` — static helper: `π/4 × L × (D_mm / 1000)²` (diameter is converted from mm to m before squaring).
 
 ---
 
