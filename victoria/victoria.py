@@ -95,7 +95,7 @@ class Victoria:
 
             # Fill remaining unfilled links with default solution
             link_list = {link.uid for link in self.net.links}
-            filled_links = set(self.solver.filled_links)
+            filled_links = {link.uid for link in self.solver.filled_links}
             unfilled_uids = link_list - filled_links
 
             if unfilled_uids:
