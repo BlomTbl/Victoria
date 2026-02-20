@@ -123,49 +123,69 @@ class Victoria:
         """
         self.solver.check_connections()
 
-    def garbage_collect(self, input_sol: Optional[Dict] = None) -> None:
+    def garbage_collect(self, input_sol: Optional[Dict] = None,
+                        preserve: Optional[Set[int]] = None) -> None:
         """
         Remove unused PHREEQC solutions from memory.
         Should be called periodically to prevent memory buildup from unused solution objects.
 
         Args:
-            input_sol: Dictionary of input solutions to preserve (optional)
+            input_sol: Dictionary of input solutions to preserve (optional).
+                       All solution objects found as values are preserved.
+            preserve:  Additional set of PHREEQC solution numbers to always keep.
+                       Use this to protect persistent end-member solutions that may
+                       temporarily not appear in input_sol (e.g. sol_high / sol_low
+                       when input_sol['R1'] points to a freshly blended step solution).
         """
         registered_solutions: Set[int] = set()
 
         # Collect solution numbers from all relevant objects
-        def _collect_solutions_from_state(state_list):
-            for parcel in state_list:
+        def _collect_from_parcels(parcel_list):
+            for parcel in parcel_list:
                 registered_solutions.update(parcel.get('q', {}).keys())
 
-        # Solutions in pipes
+        # Solutions in pipes — both the in-pipe state AND the output_state buffer
         for pipe in self.solver.models.pipes.values():
             if hasattr(pipe, 'state'):
-                _collect_solutions_from_state(pipe.state)
+                _collect_from_parcels(pipe.state)
+            if hasattr(pipe, 'output_state'):
+                _collect_from_parcels(pipe.output_state)
+
+        # Solutions in all links (pumps, valves) — output_state only (zero-length)
+        for link in self.solver.models.links.values():
+            if hasattr(link, 'output_state'):
+                _collect_from_parcels(link.output_state)
 
         # Solutions in tanks
         for tank in self.solver.models.tanks.values():
             if hasattr(tank, 'state'):
-                _collect_solutions_from_state(tank.state)
-            # For CSTR tanks, mixture dict might have solution numbers
+                _collect_from_parcels(tank.state)
             if getattr(tank, 'mixture', None) and isinstance(tank.mixture, dict):
                 registered_solutions.update(tank.mixture.keys())
 
-        # Solutions in node outputs
+        # Solutions in node mixed_parcels and outflow buffers
         for node in self.solver.models.nodes.values():
             if hasattr(node, 'mixed_parcels'):
-                _collect_solutions_from_state(node.mixed_parcels)
+                _collect_from_parcels(node.mixed_parcels)
+            if hasattr(node, 'outflow'):
+                for slot in getattr(node, 'outflow', []):
+                    for v, q in slot:
+                        registered_solutions.update(q.keys())
 
-        # Preserve input solutions - these should never be deleted
+        # Preserve all solution objects found in input_sol
         if input_sol:
             for sol in input_sol.values():
                 if hasattr(sol, 'number'):
                     registered_solutions.add(sol.number)
 
-        # Get all solutions in PHREEQC
+        # Preserve any explicitly requested solution numbers
+        if preserve:
+            registered_solutions.update(preserve)
+
+        # Get all solutions currently in PHREEQC
         phreeqc_solutions = set(self.pp.get_solution_list())
 
-        # Find solutions to remove
+        # Remove only solutions that are genuinely unreferenced
         to_forget = phreeqc_solutions - registered_solutions
         if to_forget:
             logger.info(f"Removing {len(to_forget)} unused PHREEQC solutions")
