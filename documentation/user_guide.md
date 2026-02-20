@@ -258,8 +258,8 @@ for step in range(N_STEPS):
 
 # Retrieve everything as a tidy DataFrame
 df_ts = seg.to_dataframe()
-# Columns: pipe, seg_id, x_start_m, x_end_m, x_mid_m, length_m,
-#          conc, n_parcels, step, time_s, time_min
+# Columns: pipe, step, time_s, time_min, seg_id, x_start_m, x_end_m,
+#          x_mid_m, length_m, conc, n_parcels
 ```
 
 ### Pipe metadata
