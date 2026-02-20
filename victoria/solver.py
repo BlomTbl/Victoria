@@ -179,6 +179,10 @@ class Solver:
                 sol = self._select_fill_solution(node_outflow, i, input_sol)
                 self.models.links[link.uid].fill(sol)
                 self.models.links[link.uid].ready = True
+                self.models.links[link.uid].connections(
+                    self._get_node_attr(link, 'downstream_node'),
+                    self._get_node_attr(link, 'upstream_node')
+                )
                 self.filled_links.append(link)
 
                 downstream_node = self._get_node_attr(link, 'downstream_node')
