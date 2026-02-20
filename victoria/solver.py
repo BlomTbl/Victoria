@@ -179,10 +179,6 @@ class Solver:
                 sol = self._select_fill_solution(node_outflow, i, input_sol)
                 self.models.links[link.uid].fill(sol)
                 self.models.links[link.uid].ready = True
-                self.models.links[link.uid].connections(
-                    self._get_node_attr(link, 'downstream_node'),
-                    self._get_node_attr(link, 'upstream_node')
-                )
                 self.filled_links.append(link)
 
                 downstream_node = self._get_node_attr(link, 'downstream_node')
@@ -203,12 +199,20 @@ class Solver:
         # case: single outflow slot, e.g., reservoir
         elif node_outflow and node_outflow[0]:
             return node_outflow[0][0][1]
-        # case: zero-flow node
+        # case: zero-flow node — find first available solution object
         else:
             logger.debug(
-                f"Outflow empty for downstream link index={i}, using default background solution (key=0)"
+                f"Outflow empty for downstream link index={i}, using default background solution"
             )
-            return {input_sol[0].number: 1.0}
+            candidate = input_sol.get(0, None)
+            if candidate is None:
+                for v in input_sol.values():
+                    if hasattr(v, 'number'):
+                        candidate = v
+                        break
+            if candidate is None:
+                raise KeyError("No valid solution object in input_sol for fallback fill")
+            return {candidate.number: 1.0}
 
     def reset_ready_state(self) -> None:
         """Reset the ready state of all links."""
