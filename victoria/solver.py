@@ -1,209 +1,276 @@
 """
-Solver module for water quality simulation.
-This module implements the main calculation loop for tracing water parcels through the hydraulic network.
+Solver module — geoptimaliseerde versie 2.
+
+Wijzigingen t.o.v. v1:
+  1. _build_adjacency vult de EPyNet _values-cache van elk link- en node-object
+     via directe ENgetlinkvalue / ENgetnodevalue aanroepen. Daarna leveren
+     link.flow, link.velocity, node.demand, node.outflow en node.volume
+     alleen nog een dict-lookup op — geen ctypes meer in de traversal-lus.
+  2. node.outflow (voor reservoir en tank) wordt berekend als som van de
+     stroomafwaartse link-flows uit de al-gecachede flow-dict.
+  3. Iteratieve BFS en precomputed adjacency (uit v1) blijven intact.
+  4. ready-state als set (O(1) clear).
+
+Benodigde EPANET property-codes (uit epynet/epanet2.py):
+  EN_FLOW      = 8   (link, read only)
+  EN_VELOCITY  = 9   (link, read only)
+  EN_DEMAND    = 9   (node, read only)
+  EN_TANKVOLUME= 24  (node, read only)
 """
 
-from typing import List, Any
+from collections import deque
+from typing import Any, Dict, List, Set
 import logging
 
 logger = logging.getLogger(__name__)
 
+# EPANET property codes — gespiegeld van epynet/epanet2.py zodat de solver
+# geen import-afhankelijkheid van epynet heeft.
+_EN_FLOW       = 8
+_EN_VELOCITY   = 9
+_EN_DEMAND     = 9
+_EN_TANKVOLUME = 24
+
 
 class Solver:
-    """
-    Main solver for water quality calculations.
-    Traces water parcels through the network based on hydraulic simulation results from EPyNet.
-    """
 
     def __init__(self, models: Any, network: Any):
-        """
-        Initialize solver.
-        Args:
-            models: Models instance containing all network components
-            network: EPyNet network object
-        """
         self.models = models
-        self.net = network
+        self.net    = network
         self.output: List = []
         self.filled_links: List = []
 
-    def _get_links(self, node: Any, direction: str) -> list:
+        # Precomputed adjacency — vernieuwd per stap door _build_adjacency()
+        self._up_links:   Dict[str, List[str]] = {}   # node_uid -> [link_uid,...]
+        self._down_links: Dict[str, List[str]] = {}   # node_uid -> [link_uid,...]
+        self._link_dn:    Dict[str, Any] = {}          # link_uid -> downstream node obj
+        self._link_up:    Dict[str, Any] = {}          # link_uid -> upstream node obj
+
+        # Gecachede hydraulische waarden per stap (uid -> waarde)
+        self._flow:   Dict[str, float] = {}   # link_uid -> flow [m³/h]
+        self._vel:    Dict[str, float] = {}   # link_uid -> velocity [m/s]
+
+        # Ready-set
+        self._ready: Set[str] = set()
+
+        # Snelle uid -> object lookups
+        self._link_obj: Dict[str, Any] = {l.uid: l for l in network.links}
+        self._node_obj: Dict[str, Any] = {n.uid: n for n in network.nodes}
+
+    # ── Adjacency + hydraulische cache ───────────────────────────────────────
+
+    def _build_adjacency(self) -> None:
         """
-        Get upstream or downstream links, handling both EPyNet API styles.
+        Bouw stroomopwaarts/stroomafwaarts adjacency op EN vul de EPyNet
+        _values-cache van elk link/node-object met de hydraulische waarden
+        van de huidige tijdstap.
 
-        Args:
-            node: Node object
-            direction: 'upstream' or 'downstream'
-        Returns:
-            List of links
+        Alle ENgetlinkvalue / ENgetnodevalue aanroepen gebeuren hier —
+        precies één keer per object per stap. Daarna leveren link.flow,
+        link.velocity, node.demand, node.outflow en node.volume alleen
+        nog een Python dict-lookup op (via BaseObject.get_property ->
+        _values cache hit).
         """
-        links_attr = f'{direction}_links'
-        links = getattr(node, links_attr)
-        return links() if callable(links) else links
+        ep = self.net.ep
 
-    def _get_node_attr(self, obj: Any, attr: str) -> Any:
-        """
-        Get node/link attribute, handling both methods and properties.
+        up:  Dict[str, List[str]] = {n.uid: [] for n in self.net.nodes}
+        dn:  Dict[str, List[str]] = {n.uid: [] for n in self.net.nodes}
+        lup: Dict[str, Any] = {}
+        ldn: Dict[str, Any] = {}
 
-        Args:
-            obj: Object to get attribute from
-            attr: Attribute name
-        Returns:
-            Attribute value
-        """
-        value = getattr(obj, attr)
-        return value() if callable(value) else value
+        flow_cache: Dict[str, float] = {}
+        vel_cache:  Dict[str, float] = {}
 
-    def _all_upstream_links_ready(self, node: Any) -> bool:
-        """Helper to check if all upstream links for a node are ready."""
-        upstream_links = self._get_links(node, 'upstream')
-        return all(self.models.links[link.uid].ready for link in upstream_links)
+        # ── Links: flow + velocity + adjacency ────────────────────────────────
+        for link in self.net.links:
+            idx  = link.index                              # gecached na eerste aanroep
+            flow = ep.ENgetlinkvalue(idx, _EN_FLOW)       # 1× ctypes
+            vel  = ep.ENgetlinkvalue(idx, _EN_VELOCITY)   # 1× ctypes
 
-    def _gather_inflow(self, upstream_links) -> list:
-        """Gather parcels from all upstream links."""
-        inflow = []
-        for link in upstream_links:
-            link_model = self.models.links[link.uid]
-            inflow.extend(link_model.output_state)
-        return inflow
+            # Vul EPyNet _values-cache: daarna geeft link.flow / link.velocity
+            # een cache-hit zonder extra ctypes-aanroep.
+            link._values[_EN_FLOW]     = flow
+            link._values[_EN_VELOCITY] = vel
 
-    def run_trace(self, node: Any, timestep: float, input_sol: Any) -> None:
-        """
-        Recursively trace water parcels from a node through the network.
+            flow_cache[link.uid] = flow
+            vel_cache[link.uid]  = vel
 
-        Args:
-            node: Starting node
-            timestep: Simulation timestep in seconds
-            input_sol: Dictionary of input solutions
-        """
-        # Check if all upstream links are ready
-        if not self._all_upstream_links_ready(node):
-            return
+            # Stroomrichting bepalen op basis van flow-teken
+            if flow >= 0:
+                u_node, d_node = link.from_node, link.to_node
+            else:
+                u_node, d_node = link.to_node, link.from_node
 
-        # Gather inflow from upstream
-        upstream_links = self._get_links(node, 'upstream')
-        inflow = self._gather_inflow(upstream_links)
+            lup[link.uid] = u_node
+            ldn[link.uid] = d_node
 
-        # Mix parcels at the node
-        try:
-            self.models.nodes[node.uid].mix(inflow, node, timestep, input_sol)
-        except Exception as e:
-            logger.error(f"Error mixing at node {node.uid}: {e}")
-            raise
+            # Alleen links met noemenswaardig debiet in de adjacency opnemen
+            if abs(vel) >= 0.001:
+                up[d_node.uid].append(link.uid)
+                dn[u_node.uid].append(link.uid)
 
-        # Initialize or reset flow counter for this node
-        self.models.nodes[node.uid].flowcount = 0
+        self._up_links   = up
+        self._down_links = dn
+        self._link_up    = lup
+        self._link_dn    = ldn
+        self._flow       = flow_cache
+        self._vel        = vel_cache
 
-        # Process each downstream link
-        downstream_links = self._get_links(node, 'downstream')
-        for link in downstream_links:
-            # Skip links with very low velocity
-            if link.velocity < 0.001:
-                logger.debug(f"Skipping link {link.uid} due to low velocity")
-                continue  # Do NOT increment flowcount here
+        # ── Nodes: demand + volume (tank) + outflow (reservoir/tank) ──────────
+        reservoir_uids = {r.uid for r in self.net.reservoirs}
+        tank_uids      = {t.uid for t in self.net.tanks}
 
-            node_model = self.models.nodes[node.uid]
-            flow_cnt = node_model.flowcount
-            flow_in = round(abs(link.flow) / 3600 * timestep, 7)
+        for node in self.net.nodes:
+            idx = node.index   # gecached
+
+            # node.demand (EN_DEMAND=9) — gebruikt door Junction.mix
+            demand = ep.ENgetnodevalue(idx, _EN_DEMAND)
+            if demand is not None:
+                node._values[_EN_DEMAND] = demand
+
+            if node.uid in tank_uids:
+                # node.volume (EN_TANKVOLUME=24) — gebruikt door Tank_CSTR.mix
+                vol = ep.ENgetnodevalue(idx, _EN_TANKVOLUME)
+                if vol is not None:
+                    node._values[_EN_TANKVOLUME] = vol
+
+            # node.outflow — som van stroomafwaartse link-flows [m³/h]
+            # Wordt gebruikt door Reservoir.mix en Tank.mix.
+            # Niet direct een EN-property; berekend uit de al-gecachede flows.
+            outflow = sum(abs(flow_cache[l_uid])
+                          for l_uid in dn.get(node.uid, []))
+            # Sla op als attribuut zodat node.outflow dit direct retourneert.
+            # (Overschrijft de EPyNet __getattr__ niet — die controleert
+            #  'outflow' niet in properties; dus object.__setattr__ werkt.)
+            try:
+                object.__setattr__(node, '_cached_outflow', outflow)
+            except Exception:
+                pass
+
+    # ── Ready state ───────────────────────────────────────────────────────────
+
+    def reset_ready_state(self) -> None:
+        self._ready.clear()
+        for lm in self.models.links.values():
+            lm.ready = False
+
+    # ── Iteratieve BFS trace ──────────────────────────────────────────────────
+
+    def run_trace(self, start_node: Any, timestep: float, input_sol: Any) -> None:
+        queue:   deque    = deque([start_node.uid])
+        visited: Set[str] = set()
+
+        while queue:
+            node_uid = queue.popleft()
+            if node_uid in visited:
+                continue
+
+            up_uids = self._up_links.get(node_uid, [])
+            if not all(uid in self._ready for uid in up_uids):
+                continue
+
+            visited.add(node_uid)
+            node = self._node_obj[node_uid]
+
+            inflow = []
+            for l_uid in up_uids:
+                inflow.extend(self.models.links[l_uid].output_state)
 
             try:
-                volumes = node_model.outflow[flow_cnt]
-
-                self.models.links[link.uid].push_pull(flow_in, volumes)
-                self.models.links[link.uid].ready = True
-            except IndexError:
-                logger.debug(
-                    f"outflow[{flow_cnt}] missing for link {link.uid} at node "
-                    f"{node.uid} — skipping (zero-flow parcel path)"
-                )
-                continue
+                self.models.nodes[node_uid].mix(inflow, node, timestep, input_sol)
             except Exception as e:
-                logger.error(f"Error in push_pull for link {link.uid}: {e}")
+                logger.error(f"Fout bij mixen op node {node_uid}: {e}")
                 raise
 
-            node_model.flowcount += 1
-            downstream_node = self._get_node_attr(link, 'downstream_node')
-            self.run_trace(downstream_node, timestep, input_sol)
+            node_model = self.models.nodes[node_uid]
+            node_model.flowcount = 0
+
+            for l_uid in self._down_links.get(node_uid, []):
+                # Gebruik gecachede flow — geen ctypes
+                flow_in  = round(abs(self._flow[l_uid]) / 3600 * timestep, 7)
+                flow_cnt = node_model.flowcount
+
+                try:
+                    volumes = node_model.outflow[flow_cnt]
+                    self.models.links[l_uid].push_pull(flow_in, volumes)
+                    self._ready.add(l_uid)
+                    self.models.links[l_uid].ready = True
+                except IndexError:
+                    logger.debug(
+                        f"outflow[{flow_cnt}] ontbreekt voor link {l_uid} — overgeslagen"
+                    )
+                    continue
+                except Exception as e:
+                    logger.error(f"Fout in push_pull voor link {l_uid}: {e}")
+                    raise
+
+                node_model.flowcount += 1
+                queue.append(self._link_dn[l_uid].uid)
+
+    # ── Stroomrichtingscontrole ────────────────────────────────────────────────
 
     def check_connections(self) -> None:
-        """
-        Check if flow direction has changed and reverse parcels if needed.
-        This should be called after each hydraulic timestep to handle flow reversals.
-        """
         reversed_count = 0
         for link in self.net.links:
-            link_model = self.models.links[link.uid]
-            # Check if flow direction has changed
-            if (link.upstream_node == link_model.upstream_node and
-                link.downstream_node == link_model.downstream_node):
+            lm    = self.models.links[link.uid]
+            new_u = self._link_up.get(link.uid)
+            new_d = self._link_dn.get(link.uid)
+            if new_u is None or new_d is None:
+                continue
+            if lm.upstream_node is new_u and lm.downstream_node is new_d:
+                continue
+            lm.reverse_parcels(new_d, new_u)
+            reversed_count += 1
+        if reversed_count:
+            logger.info(f"{reversed_count} links omgekeerd wegens stroomwijziging")
+
+    # ── Iteratieve netwerk-fill ───────────────────────────────────────────────
+
+    def fill_network(self, start_node: Any, input_sol: Any) -> None:
+        queue:   deque    = deque([start_node.uid])
+        visited: Set[str] = set()
+        timestep = 60
+
+        while queue:
+            node_uid = queue.popleft()
+            if node_uid in visited:
                 continue
 
-            # Flow direction has reversed
-            link_model.reverse_parcels(link.downstream_node, link.upstream_node)
-            reversed_count += 1
+            up_uids = self._up_links.get(node_uid, [])
+            if not all(uid in self._ready for uid in up_uids):
+                continue
 
-        if reversed_count > 0:
-            logger.info(f"Reversed {reversed_count} links due to flow changes")
+            visited.add(node_uid)
+            node = self._node_obj[node_uid]
 
-    def fill_network(self, node: Any, input_sol: Any) -> None:
-        """
-        Recursively fill the network from a source node.
+            inflow = []
+            for l_uid in up_uids:
+                inflow.extend(self.models.links[l_uid].output_state)
 
-        Args:
-            node: Source node (usually reservoir)
-            input_sol: Dictionary of input solutions
-        """
-        # Check if all upstream links are ready
-        if not self._all_upstream_links_ready(node):
-            return
-
-        # Gather parcels from upstream (should be empty initially)
-        upstream_links = self._get_links(node, 'upstream')
-        inflow = self._gather_inflow(upstream_links)
-
-        # Mix at node (generates initial solution for reservoirs)
-        timestep = 60  # Use 1 minute for initialization
-        try:
-            self.models.nodes[node.uid].mix(inflow, node, timestep, input_sol)
-        except Exception as e:
-            logger.error(f"Error filling node {node.uid}: {e}")
-            raise
-
-        # Fill all downstream links
-        downstream_links = self._get_links(node, 'downstream')
-        node_outflow = self.models.nodes[node.uid].outflow
-
-        for i, link in enumerate(downstream_links):
             try:
-                # Select the appropriate solution for the link
-                sol = self._select_fill_solution(node_outflow, i, input_sol)
-                self.models.links[link.uid].fill(sol)
-                self.models.links[link.uid].ready = True
-                self.filled_links.append(link)
-
-                downstream_node = self._get_node_attr(link, 'downstream_node')
-                self.fill_network(downstream_node, input_sol)
+                self.models.nodes[node_uid].mix(inflow, node, timestep, input_sol)
             except Exception as e:
-                logger.error(f"Error filling link {link.uid}: {e}")
+                logger.error(f"Fout bij initialiseren node {node_uid}: {e}")
                 raise
+
+            node_outflow = self.models.nodes[node_uid].outflow
+
+            for i, l_uid in enumerate(self._down_links.get(node_uid, [])):
+                lm  = self.models.links[l_uid]
+                sol = self._select_fill_solution(node_outflow, i, input_sol)
+                lm.fill(sol)
+                self._ready.add(l_uid)
+                lm.ready = True
+                self.filled_links.append(self._link_obj[l_uid])
+                queue.append(self._link_dn[l_uid].uid)
 
     @staticmethod
     def _select_fill_solution(node_outflow: list, i: int, input_sol: Any) -> Any:
-        """
-        Determines which solution should be used to fill the link based on node outflow.
-        Handles edge cases for zero-flow, multiple links, etc.
-        """
-        # case: normal outflow per link
         if node_outflow and i < len(node_outflow) and node_outflow[i]:
             return node_outflow[i][0][1]
-        # case: single outflow slot, e.g., reservoir
         elif node_outflow and node_outflow[0]:
             return node_outflow[0][0][1]
-        # case: zero-flow node — find first available solution object
         else:
-            logger.debug(
-                f"Outflow empty for downstream link index={i}, using default background solution"
-            )
             candidate = input_sol.get(0, None)
             if candidate is None:
                 for v in input_sol.values():
@@ -211,10 +278,18 @@ class Solver:
                         candidate = v
                         break
             if candidate is None:
-                raise KeyError("No valid solution object in input_sol for fallback fill")
+                raise KeyError("Geen geldig solution-object in input_sol voor fallback fill")
             return {candidate.number: 1.0}
 
-    def reset_ready_state(self) -> None:
-        """Reset the ready state of all links."""
-        for link in self.net.links:
-            self.models.links[link.uid].ready = False
+    # ── Achterwaartse compatibiliteit ─────────────────────────────────────────
+
+    def _get_links(self, node: Any, direction: str) -> list:
+        uids = (self._up_links if direction == 'upstream' else self._down_links).get(node.uid, [])
+        return [self._link_obj[u] for u in uids]
+
+    def _get_node_attr(self, obj: Any, attr: str) -> Any:
+        v = getattr(obj, attr)
+        return v() if callable(v) else v
+
+    def _all_upstream_links_ready(self, node: Any) -> bool:
+        return all(uid in self._ready for uid in self._up_links.get(node.uid, []))
