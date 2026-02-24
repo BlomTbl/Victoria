@@ -1,18 +1,18 @@
 """
-Segmentation module geoptimaliseerd.
+Segmentation module optimized.
 
-Interface identiek aan referentieversie (conc + sc kolommen).
-Intern: PhreeqPython volledig omzeild via calibrate().
+Interface identical to reference version (conc + sc columns).
+Internal: PhreeqPython completely bypassed via calibrate().
 
-conc en sc zijn EXACT lineair in frac_high (verificatie: max afwijking = 0):
-    conc = frac_high * ca_high_mg
-    sc   = frac_high * sc_high
+conc and sc are EXACTLY linear in frac_high (verification: max deviation = 0):
+conc = frac_high * ca_high_mg
+sc = frac_high * sc_high
 
-Gebruik:
-    seg = vic.segmentation(seg_length_m=6.0)
-    seg.calibrate(sol_high, sc_high=600.0)  # 1x aanroep
-    seg.record_step(net, species="Ca", units="mg", time_s=..., step=...)
-    df = seg.to_dataframe()   # identieke kolommen als referentie
+Usage:
+seg = vic.segmentation(seg_length_m=6.0)
+seg.calibrate(sol_high, sc_high=600.0) # Called once
+seg.record_step(net, species="Ca", units="mg", time_s=..., step=...)
+df = seg.to_dataframe() # identical columns as reference
 """
 
 from __future__ import annotations
@@ -40,8 +40,8 @@ class PipeSegmentation:
     def calibrate(self, sol_high: Any, sc_high: float = 1000.0,
                   sc_low: float = 0.0, species: str = "Ca", units: str = "mg") -> None:
         """
-        Eenmalige kalibratie op basis van sol_high.
-        Na deze aanroep gebruikt record_step/segment_pipe geen PhreeqPython meer.
+        One-time calibration based on sol_high.
+        After this call, record_step/segment_pipe will no longer use PhreeqPython.
         """
         self._sol_high_num = sol_high.number
         self._sc_high      = sc_high
