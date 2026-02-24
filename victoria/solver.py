@@ -1,31 +1,31 @@
 """
-Solver module — geoptimaliseerde versie 2.
+Solver module — optimized version 2.
 
-Wijzigingen t.o.v. v1:
-  1. _build_adjacency vult de EPyNet _values-cache van elk link- en node-object
-     via directe ENgetlinkvalue / ENgetnodevalue aanroepen. Daarna leveren
-     link.flow, link.velocity, node.demand, node.outflow en node.volume
-     alleen nog een dict-lookup op — geen ctypes meer in de traversal-lus.
-  2. node.outflow (voor reservoir en tank) wordt berekend als som van de
-     stroomafwaartse link-flows uit de al-gecachede flow-dict.
-  3. Iteratieve BFS en precomputed adjacency (uit v1) blijven intact.
-  4. ready-state als set (O(1) clear).
+Changes compared to v1:
+  1. _build_adjacency fills the EPyNet _values ​​cache of each link and node object
+     via direct ENgetlinkvalue / ENgetnodevalue calls. Then deliver
+     link.flow, link.velocity, node.demand, node.outflow and node.volume
+     just a dict lookup — no more ctypes in the traversal loop.
+  2. node.outflow (for reservoir and tank) is calculated as the sum of the
+     downstream link flows from the already cached flow dict.
+  3. Iterative BFS and precomputed adjacency (from v1) remain intact.
+  4. ready-state as set (O(1) clear).
 
-Benodigde EPANET property-codes (uit epynet/epanet2.py):
-  EN_FLOW      = 8   (link, read only)
-  EN_VELOCITY  = 9   (link, read only)
-  EN_DEMAND    = 9   (node, read only)
-  EN_TANKVOLUME= 24  (node, read only)
+Required EPANET property codes (from epynet/epanet2.py):
+  EN_FLOW = 8 (link, read only)
+  EN_VELOCITY = 9 (link, read only)
+  EN_DEMAND = 9 (node, read only)
+  EN_TANKVOLUME= 24 (node, read only)
 """
 
 from collections import deque
-from typing import Any, Dict, List, Set
+from typing import Any, Dict, List, Optional, Set
 import logging
 
 logger = logging.getLogger(__name__)
 
-# EPANET property codes — gespiegeld van epynet/epanet2.py zodat de solver
-# geen import-afhankelijkheid van epynet heeft.
+# EPANET property codes — mirrored from epynet/epanet2.py so that the solver
+# has no import dependency on epynet.
 _EN_FLOW       = 8
 _EN_VELOCITY   = 9
 _EN_DEMAND     = 9
@@ -40,18 +40,22 @@ class Solver:
         self.output: List = []
         self.filled_links: List = []
 
-        # Precomputed adjacency — vernieuwd per stap door _build_adjacency()
+        # Precomputed adjacency — refreshed per step by _build_adjacency()
         self._up_links:   Dict[str, List[str]] = {}   # node_uid -> [link_uid,...]
         self._down_links: Dict[str, List[str]] = {}   # node_uid -> [link_uid,...]
         self._link_dn:    Dict[str, Any] = {}          # link_uid -> downstream node obj
         self._link_up:    Dict[str, Any] = {}          # link_uid -> upstream node obj
 
-        # Gecachede hydraulische waarden per stap (uid -> waarde)
+        # Cached hydraulic values ​​per step (uid -> value)
         self._flow:   Dict[str, float] = {}   # link_uid -> flow [m³/h]
         self._vel:    Dict[str, float] = {}   # link_uid -> velocity [m/s]
 
         # Ready-set
         self._ready: Set[str] = set()
+
+        # Optional HydraulicCache for pre-computed hydraulics
+        self._hcache: Optional[Any] = None
+        self._hcache_step: int = 0
 
         # Snelle uid -> object lookups
         self._link_obj: Dict[str, Any] = {l.uid: l for l in network.links}
@@ -59,19 +63,35 @@ class Solver:
 
     # ── Adjacency + hydraulische cache ───────────────────────────────────────
 
+    def set_hydraulic_cache(self, hcache: Any) -> None:
+        """
+        Attach a pre-computed HydraulicCache.
+        Called before the sim loop; the notebook calls
+        _build_adjacency() explicitly after hcache.apply().
+        """
+        self._hcache = hcache
+        self._hcache_step = 0
+
     def _build_adjacency(self) -> None:
         """
-        Bouw stroomopwaarts/stroomafwaarts adjacency op EN vul de EPyNet
-        _values-cache van elk link/node-object met de hydraulische waarden
-        van de huidige tijdstap.
+        Build upstream/downstream adjacency AND populate the EPyNet
+        _values ​​cache of each link/node object containing the hydraulic values
+        of the current time step.
 
-        Alle ENgetlinkvalue / ENgetnodevalue aanroepen gebeuren hier —
-        precies één keer per object per stap. Daarna leveren link.flow,
-        link.velocity, node.demand, node.outflow en node.volume alleen
-        nog een Python dict-lookup op (via BaseObject.get_property ->
-        _values cache hit).
+        All ENgetlinkvalue / ENgetnodevalue calls happen here —
+        exactly once per object per step. Then provide link.flow,
+        link.velocity, node.demand, node.outflow and node.volume only
+        another Python dict lookup (via BaseObject.get_property ->
+        _values ​​cache hit).
         """
         ep = self.net.ep
+
+        # If a HydraulicCache is available: load the pre-computed values
+        # in the EPyNet _values ​​cache. The ENgetlinkvalue loop below reads
+        # then output _values ​​(cache hit) instead of calling ctypes.
+        if self._hcache is not None:
+            self._hcache.apply(self._hcache_step)
+            self._hcache_step += 1
 
         up:  Dict[str, List[str]] = {n.uid: [] for n in self.net.nodes}
         dn:  Dict[str, List[str]] = {n.uid: [] for n in self.net.nodes}
@@ -82,20 +102,25 @@ class Solver:
         vel_cache:  Dict[str, float] = {}
 
         # ── Links: flow + velocity + adjacency ────────────────────────────────
-        for link in self.net.links:
-            idx  = link.index                              # gecached na eerste aanroep
-            flow = ep.ENgetlinkvalue(idx, _EN_FLOW)       # 1× ctypes
-            vel  = ep.ENgetlinkvalue(idx, _EN_VELOCITY)   # 1× ctypes
+        _use_cache = self._hcache is not None
 
-            # Vul EPyNet _values-cache: daarna geeft link.flow / link.velocity
-            # een cache-hit zonder extra ctypes-aanroep.
-            link._values[_EN_FLOW]     = flow
-            link._values[_EN_VELOCITY] = vel
+        for link in self.net.links:
+            idx = link.index
+
+            if _use_cache:
+                # Values ​​already loaded by hcache.apply() — no ctypes
+                flow = link._values.get(_EN_FLOW, 0.0)
+                vel  = link._values.get(_EN_VELOCITY, 0.0)
+            else:
+                flow = ep.ENgetlinkvalue(idx, _EN_FLOW)
+                vel  = ep.ENgetlinkvalue(idx, _EN_VELOCITY)
+                link._values[_EN_FLOW]     = flow
+                link._values[_EN_VELOCITY] = vel
 
             flow_cache[link.uid] = flow
             vel_cache[link.uid]  = vel
 
-            # Stroomrichting bepalen op basis van flow-teken
+            # Determine flow direction based on flow sign
             if flow >= 0:
                 u_node, d_node = link.from_node, link.to_node
             else:
@@ -104,7 +129,7 @@ class Solver:
             lup[link.uid] = u_node
             ldn[link.uid] = d_node
 
-            # Alleen links met noemenswaardig debiet in de adjacency opnemen
+            # Include only links with significant throughput in the adjacency
             if abs(vel) >= 0.001:
                 up[d_node.uid].append(link.uid)
                 dn[u_node.uid].append(link.uid)
@@ -121,27 +146,25 @@ class Solver:
         tank_uids      = {t.uid for t in self.net.tanks}
 
         for node in self.net.nodes:
-            idx = node.index   # gecached
+            if not _use_cache:
+                idx = node.index
+                demand = ep.ENgetnodevalue(idx, _EN_DEMAND)
+                if demand is not None:
+                    node._values[_EN_DEMAND] = demand
+                if node.uid in tank_uids:
+                    vol = ep.ENgetnodevalue(idx, _EN_TANKVOLUME)
+                    if vol is not None:
+                        node._values[_EN_TANKVOLUME] = vol
+            # If cache is active: demands/volumes already filled by hcache.apply()
 
-            # node.demand (EN_DEMAND=9) — gebruikt door Junction.mix
-            demand = ep.ENgetnodevalue(idx, _EN_DEMAND)
-            if demand is not None:
-                node._values[_EN_DEMAND] = demand
-
-            if node.uid in tank_uids:
-                # node.volume (EN_TANKVOLUME=24) — gebruikt door Tank_CSTR.mix
-                vol = ep.ENgetnodevalue(idx, _EN_TANKVOLUME)
-                if vol is not None:
-                    node._values[_EN_TANKVOLUME] = vol
-
-            # node.outflow — som van stroomafwaartse link-flows [m³/h]
-            # Wordt gebruikt door Reservoir.mix en Tank.mix.
-            # Niet direct een EN-property; berekend uit de al-gecachede flows.
+            # node.outflow — sum of downstream link flows [m³/h]
+            # Used by Reservoir.mix and Tank.mix.
+            # Not directly an EN property; calculated from already cached flows.
             outflow = sum(abs(flow_cache[l_uid])
                           for l_uid in dn.get(node.uid, []))
-            # Sla op als attribuut zodat node.outflow dit direct retourneert.
-            # (Overschrijft de EPyNet __getattr__ niet — die controleert
-            #  'outflow' niet in properties; dus object.__setattr__ werkt.)
+            # Save this as an attribute so node.outflow returns it directly.
+            # (Doesn't overwrite the EPyNet __getattr__ — it checks
+            # 'outflow' in properties; so object.__setattr__ works.)
             try:
                 object.__setattr__(node, '_cached_outflow', outflow)
             except Exception:
@@ -179,14 +202,14 @@ class Solver:
             try:
                 self.models.nodes[node_uid].mix(inflow, node, timestep, input_sol)
             except Exception as e:
-                logger.error(f"Fout bij mixen op node {node_uid}: {e}")
+                logger.error(f"Error mixing on node {node_uid}: {e}")
                 raise
 
             node_model = self.models.nodes[node_uid]
             node_model.flowcount = 0
 
             for l_uid in self._down_links.get(node_uid, []):
-                # Gebruik gecachede flow — geen ctypes
+                # Use cached flow — no ctypes
                 flow_in  = round(abs(self._flow[l_uid]) / 3600 * timestep, 7)
                 flow_cnt = node_model.flowcount
 
@@ -197,17 +220,17 @@ class Solver:
                     self.models.links[l_uid].ready = True
                 except IndexError:
                     logger.debug(
-                        f"outflow[{flow_cnt}] ontbreekt voor link {l_uid} — overgeslagen"
+                        f"outflow[{flow_cnt}] missing for link {l_uid} — skipped"
                     )
                     continue
                 except Exception as e:
-                    logger.error(f"Fout in push_pull voor link {l_uid}: {e}")
+                    logger.error(f"Error in push_pull for link {l_uid}: {e}")
                     raise
 
                 node_model.flowcount += 1
                 queue.append(self._link_dn[l_uid].uid)
 
-    # ── Stroomrichtingscontrole ────────────────────────────────────────────────
+    # ── Flow direction control ────────────────────────────────────────────────
 
     def check_connections(self) -> None:
         reversed_count = 0
@@ -222,9 +245,9 @@ class Solver:
             lm.reverse_parcels(new_d, new_u)
             reversed_count += 1
         if reversed_count:
-            logger.info(f"{reversed_count} links omgekeerd wegens stroomwijziging")
+            logger.info(f"{reversed_count} links reversed due to flow direction change")
 
-    # ── Iteratieve netwerk-fill ───────────────────────────────────────────────
+    # ── Iterative network fill ───────────────────────────────────────────────
 
     def fill_network(self, start_node: Any, input_sol: Any) -> None:
         queue:   deque    = deque([start_node.uid])
@@ -250,7 +273,7 @@ class Solver:
             try:
                 self.models.nodes[node_uid].mix(inflow, node, timestep, input_sol)
             except Exception as e:
-                logger.error(f"Fout bij initialiseren node {node_uid}: {e}")
+                logger.error(f"Error initializing node {node_uid}: {e}")
                 raise
 
             node_outflow = self.models.nodes[node_uid].outflow
@@ -278,10 +301,10 @@ class Solver:
                         candidate = v
                         break
             if candidate is None:
-                raise KeyError("Geen geldig solution-object in input_sol voor fallback fill")
+                raise KeyError("No valid solution-object in input_sol for fallback fill")
             return {candidate.number: 1.0}
 
-    # ── Achterwaartse compatibiliteit ─────────────────────────────────────────
+    # ── Backward compatibility ─────────────────────────────────────────
 
     def _get_links(self, node: Any, direction: str) -> list:
         uids = (self._up_links if direction == 'upstream' else self._down_links).get(node.uid, [])
