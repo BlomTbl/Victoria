@@ -2,23 +2,90 @@
 Segmentation module optimized.
 
 Interface identical to reference version (conc + sc columns).
-Internal: PhreeqPython completely bypassed via calibrate().
+Internal: Completely bypassed PhreeqPython via calibrate().
 
 conc and sc are EXACTLY linear in frac_high (verification: max deviation = 0):
-conc = frac_high * ca_high_mg
-sc = frac_high * sc_high
+    conc = frac_high * ca_high_mg
+    sc = frac_high * sc_high
 
 Usage:
-seg = vic.segmentation(seg_length_m=6.0)
-seg.calibrate(sol_high, sc_high=600.0) # Called once
-seg.record_step(net, species="Ca", units="mg", time_s=..., step=...)
-df = seg.to_dataframe() # identical columns as reference
+    seg = vic.segmentation(seg_length_m=6.0)
+    seg.calibrate(sol_high, sc_high=600.0) # 1x call
+    seg.record_step(net, species="Ca", units="mg", time_s=..., step=...)
+    df = seg.to_dataframe() # identical columns for reference
 """
 
 from __future__ import annotations
 import math
 from typing import Any, Dict, List, Optional
 import pandas as pd
+import math as _math_seg
+
+_NICE_LENGTHS = [1, 2, 5, 10, 25, 50, 100, 250, 500]
+
+
+def _round_nice(x):
+    for n in _NICE_LENGTHS:
+        if n >= x:
+            return float(n)
+    return float(round(x / 100) * 100)
+
+
+def suggest_seg_length(network, hydstep_s, min_segs_per_pipe=5, velocity_percentile=50.0):
+    lengths = [(getattr(p, "uid", str(i)), getattr(p, "length", 0.0))
+               for i, p in enumerate(network.pipes)
+               if getattr(p, "length", 0.0) > 0]
+    if not lengths:
+        return {"seg_length_m": 10.0, "seg_length_raw": 10.0,
+                "L_min_m": 0, "L_min_pipe": "-", "v_typ_ms": 0,
+                "parcel_shift_m": 0, "n_segs_total": 0, "warn_too_fine": False}
+
+    uid_min, L_min = min(lengths, key=lambda x: x[1])
+
+    vels = []
+    for link in network.links:
+        try:
+            v = abs(link.velocity)
+            if v > 1e-4:
+                vels.append(v)
+        except Exception:
+            pass
+    if vels:
+        vels.sort()
+        idx = int(len(vels) * velocity_percentile / 100)
+        v_typ = vels[min(idx, len(vels) - 1)]
+    else:
+        v_typ = 0.1
+
+    parcel_shift = v_typ * hydstep_s
+    seg_raw      = L_min / min_segs_per_pipe
+    seg_nice     = _round_nice(seg_raw)
+    warn         = seg_nice < parcel_shift / 4
+
+    n_segs = sum(_math_seg.ceil(l / seg_nice) for _, l in lengths)
+
+    return {
+        "seg_length_m":   seg_nice,
+        "seg_length_raw": round(seg_raw, 2),
+        "L_min_m":        L_min,
+        "L_min_pipe":     uid_min,
+        "v_typ_ms":       round(v_typ, 4),
+        "parcel_shift_m": round(parcel_shift, 1),
+        "n_segs_total":   n_segs,
+        "warn_too_fine":  warn,
+    }
+
+
+def print_seg_advice(r):
+    print(f"  Recommended segment length : {r['seg_length_m']:.0f} m  (exact {r['seg_length_raw']:.1f} m)")
+    segs_per_min = int(r["L_min_m"] / r["seg_length_m"])
+    print(f"  Shortest pipe            : {r['L_min_m']:.1f} m  (pipe '{r['L_min_pipe']}')  -> {segs_per_min} segments")
+    print(f"  Typical velocity         : {r['v_typ_ms']:.3f} m/s  -> parcel length {r['parcel_shift_m']:.1f} m/step")
+    print(f"  Total segments           : {r['n_segs_total']}")
+    if r["warn_too_fine"]:
+        print(f"  Tip: segments ({r['seg_length_m']:.0f}m) << parcellengte ({r['parcel_shift_m']:.0f}m/step).")
+        print(f"       Larger segment length gives less calculation time without loss of information.")
+
 
 __all__ = ["PipeSegmentation"]
 
@@ -41,7 +108,7 @@ class PipeSegmentation:
                   sc_low: float = 0.0, species: str = "Ca", units: str = "mg") -> None:
         """
         One-time calibration based on sol_high.
-        After this call, record_step/segment_pipe will no longer use PhreeqPython.
+        After this call, record_step/segment_pipe no longer uses PhreeqPython.
         """
         self._sol_high_num = sol_high.number
         self._sc_high      = sc_high
