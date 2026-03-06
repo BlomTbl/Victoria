@@ -7,7 +7,7 @@
 [![EPyNet](https://img.shields.io/badge/epynet-2025-orange)](https://github.com/pyepanet/epynet)
 [![PhreeqPython](https://img.shields.io/badge/phreeqpython-required-red)](https://github.com/Vitens/phreeqpython)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![Version](https://img.shields.io/badge/version-1.1.0-informational)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.2.0-informational)](CHANGELOG.md)
 
 Victoria simuleert waterchemische kwaliteit in hydraulische distributienetwerken door PHREEQC-geochemie te koppelen aan EPyNet-hydraulica. Water wordt bijgehouden als **discrete parcels** in leidingen (FIFO) en volledig gemengd op knooppunten en tanks — zonder de numerieke diffusie van Euleriaanse methoden.
 
@@ -49,6 +49,9 @@ Victoria simuleert waterchemische kwaliteit in hydraulische distributienetwerken
 - **PipeSegmentation** — vaste-lengte segmenten voor ruimtelijke analyses en time-series opname
 - **Garbage collection** — verwijdert ongebruikte PHREEQC-solutions bij lange simulaties
 - **O(n log n) sweep** in junctionmenging — reduceert complexiteit ten opzichte van de naïeve O(n²) aanpak
+- **Numpy-gevectoriseerde junctionmenging** — overlap berekend als matrixoperatie; ~3–5× sneller dan de pure-Python lus
+- **Numpy-gevectoriseerde segmentatie** — segmentoverlap berekend als `(n_segs × n_parcels)`-matrix; elimineert binnenste Python-lussen
+- **LRU-mengselcache** (512 entries) — herhaalde PHREEQC-mengberekeningen worden direct uit de cache geretourneerd
 
 ---
 
@@ -263,6 +266,8 @@ Quality(pp: PhreeqPython, models: Models)
 
 Berekent concentraties en watereigenschappen door PHREEQC-solutions te mengen. Normaal via `Victoria`-methoden gebruikt; ook rechtstreeks beschikbaar op `victoria.quality`.
 
+Resultaten van `pp.mix_solutions()` worden gecachet in een LRU-cache (standaard 512 entries, instelbaar via `Quality.mix_cache_size`). Herhaalde aanroepen met dezelfde mengverhoudingen — gebruikelijk in stabiele of langzaam veranderende netwerken — worden direct uit de cache geretourneerd zonder PHREEQC-berekening.
+
 ---
 
 ### FIFO & Pipe
@@ -309,7 +314,7 @@ Alle modellen erven van `MIX` en implementeren `mix(inflow, node, timestep, inpu
 
 | Klasse | Mengmodel | Toepassing |
 |---|---|---|
-| `Junction` | O(n log n) grenspuntsweep + PHREEQC | Standaard knooppunt met watervraag |
+| `Junction` | O(n log n) grenspuntsweep + numpy-gevectoriseerde overlap + PHREEQC | Standaard knooppunt met watervraag |
 | `Reservoir` | Vaste invoeroplossing | Waterreservoir / inlaatpunt |
 | `Tank_CSTR` | Volledig gemengd (impliciet Euler) | Tank met continue doorstroming |
 | `Tank_FIFO` | First-In First-Out | Gestratificeerde tank |
@@ -512,6 +517,11 @@ Ja, zie [Tankmodel wijzigen](#tankmodel-wijzigen). `Tank_FIFO` is geschikt voor 
 ---
 
 ## Versiehistorie
+
+### 1.2.0
+- `Junction.mix()` numpy-gevectoriseerd — overlap berekend als één matrixoperatie (~3–5× sneller)
+- `PipeSegmentation._seg_fast()` en `_seg_phreeqc()` volledig gevectoriseerd met numpy
+- `Quality.mix_cache_size` verhoogd van 256 naar 512
 
 ### 1.1.0
 - Parcel merging op leidingen (`_merge_adjacent`, `_enforce_max_parcels`)
