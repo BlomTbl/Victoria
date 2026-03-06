@@ -1,19 +1,12 @@
 """
-Quality module — version 2.
+Quality module — version 3.
 
-Changes compared to v1:
-  - _mix_phreeqc_solutions: results are cached via an LRU cache keyed on
-    a frozen set (frozenset of solution_dict items). Repeated calls with
-    the same mixture fractions (common in steady or slowly changing
-    networks) now result in a cache hit instead of a new PHREEQC
-    computation. Cache size is configurable via Quality.mix_cache_size
-    (default 256).
-  - get_conc_node / _get_conc_node_internal: docstring clarifies that
-    'instantaneous' returns the *first parcel in mixed_parcels*
-    (the parcel with the lowest x-coordinate, i.e. the oldest water
-    closest to the offtake).
-  - _mix_phreeqc_solutions: cache is automatically invalidated when pp
-    is replaced (future use).
+Changes compared to v2:
+  - mix_cache_size default raised from 256 to 512.
+    Larger networks with more unique mixture combinations benefit from
+    a bigger cache; the memory cost is negligible compared to PHREEQC
+    solution objects already held in memory.
+  - All other functionality identical to v2.
 """
 
 from __future__ import annotations
@@ -38,7 +31,7 @@ class Quality:
         Default 256.
     """
 
-    mix_cache_size: int = 256
+    mix_cache_size: int = 512
 
     def __init__(self, pp: Any, models: Any):
         """
