@@ -1,20 +1,25 @@
 """
-Segmentation module — version 2.
+Segmentation module — version 3.
 
-Changes compared to v1:
-  - calibrate(): warns when more than one unique solution number besides
-    sol_high is present in the parcel states. The linear concentration
-    assumption (conc = frac_high * ca_high_mg) is only valid for
-    two-endmember mixtures; with multiple sources calibrate() produced
-    silent errors. The new check informs the user that segmented output
-    is then only an approximation.
-  - All other functionality identical to v1.
+Changes compared to v2:
+  - _seg_fast: fully vectorised with numpy.
+    Parcel arrays (x0, x1, high-fraction, sc-fraction) are built once
+    per pipe; all segment overlaps are computed as a (n_segs × n_parcels)
+    matrix operation. No Python loop over parcels. Gives a large speed-up
+    for pipes with many segments and/or many parcels.
+  - _seg_phreeqc: same vectorisation applied for the overlap/weighted-
+    average step; the concentration values are still produced by
+    quality.get_conc_pipe (PHREEQC), but the subsequent aggregation per
+    segment is now O(n_segs) instead of O(n_segs × n_parcels) in Python.
+  - calibrate(): warning for more than two end-members (from v2) retained.
+  - All other functionality identical to v2.
 """
 
 from __future__ import annotations
 
 import math
 from typing import Any, Dict, List, Optional
+import numpy as np
 import pandas as pd
 import math as _math_seg
 
@@ -210,37 +215,52 @@ class PipeSegmentation:
         if not state:
             return []
 
-        n_segs  = math.ceil(pipe_length / self.seg_length_m)
+        n_segs = math.ceil(pipe_length / self.seg_length_m)
+
+        # ── Build parcel arrays once ──────────────────────────────────────────
+        px0   = np.array([p["x0"] for p in state], dtype=np.float64)
+        px1   = np.array([p["x1"] for p in state], dtype=np.float64)
+        p_hi  = np.array([p["q"].get(self._sol_high_num, 0.0) for p in state],
+                          dtype=np.float64)
+        p_conc = p_hi * self._ca_high_mg   # concentration contribution per parcel
+        p_sc   = p_hi * self._sc_high       # sc contribution per parcel
+
+        # ── Segment boundaries as arrays ──────────────────────────────────────
+        seg_idx_arr = np.arange(n_segs, dtype=np.float64)
+        s0_arr = seg_idx_arr * self.seg_length_m
+        s1_arr = np.minimum(s0_arr + self.seg_length_m, pipe_length)
+        x0_seg = s0_arr / pipe_length
+        x1_seg = s1_arr / pipe_length
+
+        # ── Vectorised overlap matrix: shape (n_segs, n_parcels) ─────────────
+        # ov[i, j] = overlap of segment i with parcel j (0 if no overlap)
+        ov = np.maximum(
+            0.0,
+            np.minimum(x1_seg[:, None], px1[None, :]) -
+            np.maximum(x0_seg[:, None], px0[None, :])
+        )  # (n_segs, n_parcels)
+
+        ot       = ov.sum(axis=1)                    # total overlap per segment
+        wc       = (ov * p_conc[None, :]).sum(axis=1)
+        ws       = (ov * p_sc[None, :]).sum(axis=1)
+        n_ov_arr = (ov > 0).sum(axis=1)
+
+        safe_ot = np.where(ot > 0, ot, 1.0)         # avoid division by zero
+
         results = []
-        for seg_idx in range(n_segs):
-            s0     = seg_idx * self.seg_length_m
-            s1     = min(s0 + self.seg_length_m, pipe_length)
-            x0_seg = s0 / pipe_length
-            x1_seg = s1 / pipe_length
-
-            wc = ws = ot = 0.0
-            n_ov = 0
-            for pa in state:
-                ov0 = max(pa["x0"], x0_seg)
-                ov1 = min(pa["x1"], x1_seg)
-                if ov1 <= ov0:
-                    continue
-                ov = ov1 - ov0
-                c, s = self._fast(pa["q"])
-                wc += c * ov
-                ws += s * ov
-                ot += ov
-                n_ov += 1
-
+        for i in range(n_segs):
+            s0 = float(s0_arr[i])
+            s1 = float(s1_arr[i])
+            t  = float(ot[i])
             results.append({
-                "seg_id":    seg_idx + 1,
+                "seg_id":    i + 1,
                 "x_start_m": round(s0, 6),
                 "x_end_m":   round(s1, 6),
                 "x_mid_m":   round((s0 + s1) / 2, 6),
                 "length_m":  round(s1 - s0, 6),
-                "conc":      wc / ot if ot > 0 else 0.0,
-                "sc":        ws / ot if ot > 0 else 0.0,
-                "n_parcels": n_ov,
+                "conc":      float(wc[i] / safe_ot[i]) if t > 0 else 0.0,
+                "sc":        float(ws[i] / safe_ot[i]) if t > 0 else 0.0,
+                "n_parcels": int(n_ov_arr[i]),
             })
         return results
 
@@ -249,32 +269,46 @@ class PipeSegmentation:
         parcels = self.model.get_conc_pipe(pipe, species, units)
         if not parcels:
             return []
-        n_segs  = math.ceil(pipe_length / self.seg_length_m)
+
+        n_segs = math.ceil(pipe_length / self.seg_length_m)
+
+        # ── Build parcel arrays once ──────────────────────────────────────────
+        px0   = np.array([p["x0"] for p in parcels], dtype=np.float64)
+        px1   = np.array([p["x1"] for p in parcels], dtype=np.float64)
+        pconc = np.array([p["q"]  for p in parcels], dtype=np.float64)
+
+        # ── Segment boundaries as arrays ──────────────────────────────────────
+        seg_idx_arr = np.arange(n_segs, dtype=np.float64)
+        s0_arr = seg_idx_arr * self.seg_length_m
+        s1_arr = np.minimum(s0_arr + self.seg_length_m, pipe_length)
+        x0_seg = s0_arr / pipe_length
+        x1_seg = s1_arr / pipe_length
+
+        # ── Vectorised overlap matrix: shape (n_segs, n_parcels) ─────────────
+        ov = np.maximum(
+            0.0,
+            np.minimum(x1_seg[:, None], px1[None, :]) -
+            np.maximum(x0_seg[:, None], px0[None, :])
+        )
+
+        ot       = ov.sum(axis=1)
+        ws       = (ov * pconc[None, :]).sum(axis=1)
+        n_ov_arr = (ov > 0).sum(axis=1)
+        safe_ot  = np.where(ot > 0, ot, 1.0)
+
         results = []
-        for seg_idx in range(n_segs):
-            s0     = seg_idx * self.seg_length_m
-            s1     = min(s0 + self.seg_length_m, pipe_length)
-            x0_seg = s0 / pipe_length
-            x1_seg = s1 / pipe_length
-            ws = ot = 0.0
-            n_ov = 0
-            for pa in parcels:
-                ov0 = max(pa["x0"], x0_seg)
-                ov1 = min(pa["x1"], x1_seg)
-                if ov1 <= ov0:
-                    continue
-                ov = ov1 - ov0
-                ws += pa["q"] * ov
-                ot += ov
-                n_ov += 1
+        for i in range(n_segs):
+            s0 = float(s0_arr[i])
+            s1 = float(s1_arr[i])
+            t  = float(ot[i])
             results.append({
-                "seg_id":    seg_idx + 1,
+                "seg_id":    i + 1,
                 "x_start_m": round(s0, 6),
                 "x_end_m":   round(s1, 6),
                 "x_mid_m":   round((s0 + s1) / 2, 6),
                 "length_m":  round(s1 - s0, 6),
-                "conc":      ws / ot if ot > 0 else 0.0,
-                "n_parcels": n_ov,
+                "conc":      float(ws[i] / safe_ot[i]) if t > 0 else 0.0,
+                "n_parcels": int(n_ov_arr[i]),
             })
         return results
 
