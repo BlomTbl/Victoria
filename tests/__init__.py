@@ -15,13 +15,14 @@ import pytest
 def test_package_import():
     """Test dat het victoria package correct kan worden geïmporteerd."""
     import victoria
-    assert victoria.__version__ == '1.0.0'
+    assert victoria.__version__ == '1.1.0'
 
 
 def test_main_classes_available():
     """Test dat alle hoofdclasses beschikbaar zijn."""
     from victoria import (
         Victoria, Models, Solver, Quality,
+        PipeSegmentation,
         FIFO, Pipe, Pump, Valve,
         MIX, Junction, Reservoir, Tank_CSTR, Tank_FIFO, Tank_LIFO
     )
@@ -31,6 +32,7 @@ def test_main_classes_available():
     assert Models is not None
     assert Solver is not None
     assert Quality is not None
+    assert PipeSegmentation is not None
     assert FIFO is not None
     assert MIX is not None
 

@@ -14,6 +14,35 @@ en dit project volgt [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Ondersteuning voor meer tank modellen
 - Export functionaliteit naar CSV/Excel
 
+## [1.1.0] - 2025-02-19
+
+### Added
+- **Segmentation Module** (`segmentation.py`)
+  - `PipeSegmentation` class voor segment-niveau concentratie analyse
+  - `segment_pipe()` — berekent concentratie per fysiek segment van één leiding
+  - `segment_network()` — segmenteert alle leidingen en geeft een tidy DataFrame
+  - `record_step()` — legt segment-concentraties vast tijdens de simulatielus
+  - `to_dataframe()` — geeft volledige tijdreeks terug als pandas DataFrame
+  - `reset()` — wist de interne buffer
+  - `pipe_metadata()` — overzicht van segmentaantallen per leiding
+
+- **Victoria API uitbreidingen** (`victoria.py`)
+  - `segmentation(seg_length_m)` — maakt een `PipeSegmentation` recorder gebonden aan het model
+  - `segment_pipe(pipe, species, units, seg_length_m)` — eenmalige query voor één leiding
+  - `segment_network(network, species, units, seg_length_m)` — eenmalige snapshot van het hele netwerk
+
+- **Package exports** (`__init__.py`)
+  - `PipeSegmentation` toegevoegd aan publieke API en `__all__`
+
+### Fixed
+- **PHREEQC oxygen convergentie** (`quality.py`)
+  - Oxygen mass convergentie waarschuwingen worden nu op `DEBUG` niveau gelogd in plaats van `ERROR`
+  - Voorkomt duizenden identieke foutmeldingen bij grote netwerken
+  - Simulatieresultaten zijn niet beïnvloed (was al non-fatal)
+
+### Changed
+- Versie gebumpt van 1.0.0 naar 1.1.0
+
 ## [1.0.0] - 2024-02-11
 
 ### Added

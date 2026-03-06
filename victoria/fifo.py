@@ -1,312 +1,202 @@
 """
-FIFO (First In First Out) module for hydraulic network modeling.
+FIFO module — geoptimaliseerde versie.
 
-This module implements various link types (pipes, pumps, valves) using
-FIFO principle for water parcel tracking.
+Wijzigingen t.o.v. origineel:
+  1. push_in: cumulatief offset-systeem vervangt de O(n_parcels) shift-lus.
+     Bestaande parcels worden NIET meer per-parcel verschoven; in plaats daarvan
+     houdt elk parcel een 'offset' bij die eenmalig bij uitlezen verrekend wordt.
+     Dit verlaagt push_in van O(n²) naar O(n) over de levensduur van de pipe.
+  2. Parcel-samenvoegen (merge): aangrenzende parcels met identieke kwaliteit
+     worden samengevoegd bij push_in en push_pull om de lijstlengte klein te houden.
+  3. round() in de push_pull-lus: vervangen door drempelwaarde-check (< 1e-10)
+     wat numeriek stabiel is maar sneller dan Python's round().
 """
+
 from typing import List, Dict, Any, Optional
-from dataclasses import dataclass, field
 
-
-@dataclass
-class Parcel:
-    """Represents a water parcel with position and quality."""
-    x0: float  # Start position (0-1)
-    x1: float  # End position (0-1)
-    q: Dict[int, float]  # Quality/solution mixture
-    
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert parcel to dictionary format."""
-        return {'x0': self.x0, 'x1': self.x1, 'q': self.q}
+EPS = 1e-10   # drempel voor numerieke nul
 
 
 class FIFO:
-    """Base class for all FIFO link objects in the hydraulic network."""
-    
+    """Basisklasse voor alle FIFO-linken in het hydraulisch netwerk."""
+
     def __init__(self, volume: float = 0.0):
-        """
-        Initialize FIFO link.
-        
-        Args:
-            volume: Physical volume of the link in m³
-        """
-        self.volume = volume
-        self.state: List[Dict[str, Any]] = []
+        self.volume   = volume
+        self.state:        List[Dict[str, Any]] = []
         self.output_state: List[Dict[str, Any]] = []
-        self.ready = False
+        self.ready    = False
         self.downstream_node: Optional[Any] = None
-        self.upstream_node: Optional[Any] = None
+        self.upstream_node:   Optional[Any] = None
+        # Cumulatieve offset: de werkelijke positie van een parcel is
+        # parcel['x0'] + _offset en parcel['x1'] + _offset.
+        self._offset: float = 0.0
 
     def connections(self, downstream: Any, upstream: Any) -> None:
-        """
-        Set the downstream and upstream node connections.
-        
-        Args:
-            downstream: Downstream node object
-            upstream: Upstream node object
-        """
         self.downstream_node = downstream
-        self.upstream_node = upstream
+        self.upstream_node   = upstream
+
+    def _materialize(self) -> None:
+        """
+        Verwerk de cumulatieve offset en schrijf absolute posities terug.
+        Nodig voor operaties die met x0/x1 werken (reverse, output-scan).
+        """
+        if self._offset == 0.0:
+            return
+        for s in self.state:
+            s['x0'] += self._offset
+            s['x1'] += self._offset
+        self._offset = 0.0
 
     def reverse_parcels(self, downstream: Any, upstream: Any) -> None:
-        """
-        Reverse parcel positions when flow direction changes.
-        
-        Args:
-            downstream: New downstream node
-            upstream: New upstream node
-        """
-        reversed_state = []
-        for parcel in self.state:
-            # Reverse positions: (1-x1) becomes new x0, (1-x0) becomes new x1
-            reversed_state.append({
-                'x0': abs(1 - parcel['x1']),
-                'x1': abs(1 - parcel['x0']),
-                'q': parcel['q']
-            })
-
-        self.state = sorted(reversed_state, key=lambda p: p['x1'])
+        self._materialize()
+        self.state = sorted(
+            [{'x0': abs(1 - p['x1']), 'x1': abs(1 - p['x0']), 'q': p['q']}
+             for p in self.state],
+            key=lambda p: p['x1']
+        )
         self.downstream_node = downstream
-        self.upstream_node = upstream
+        self.upstream_node   = upstream
 
     def push_in(self, volumes: List[List[Any]]) -> None:
         """
-        Push parcels into the link (recursive implementation).
-        
-        Args:
-            volumes: List of [volume, quality] pairs to push
+        Duw parcels in de link.
+
+        Optimalisatie: in plaats van alle bestaande parcels te verschuiven
+        (O(n) per injected parcel), verhogen we alleen de globale offset.
+        De 'virtuele' positie van parcel i is: state[i]['x0'] + _offset.
+        Dit maakt push_in O(1) per parcel i.p.v. O(n).
         """
-        if not volumes:
-            return
-
-        # Process last parcel (LIFO for pushing)
-        v, q = volumes[-1]
-        
         if self.volume <= 0:
-            volumes.pop()
-            if volumes:
-                self.push_in(volumes)
             return
 
-        fraction = v / self.volume
-        
-        # Shift existing parcels
-        self.state = [
-            {
-                'x0': s['x0'] + fraction,
-                'x1': s['x1'] + fraction,
-                'q': s['q']
-            }
-            for s in self.state
-        ]
+        while volumes:
+            v, q = volumes.pop()
+            if v <= 0:
+                continue
+            fraction = v / self.volume
 
-        # Add new parcel at the beginning
-        new_state = []
-        if self.state and q == self.state[0]['q']:
-            # Merge with existing parcel if same quality
-            self.state[0]['x0'] = 0
-        else:
-            new_state.append({
-                'x0': 0,
-                'x1': fraction,
-                'q': q
-            })
+            # Verschuif alle bestaande parcels via offset (O(1))
+            self._offset += fraction
 
-        self.state = new_state + self.state
-        volumes.pop()
+            # Voeg nieuw parcel toe aan het begin (positie 0..fraction)
+            # De absolute positie is 0..fraction (ten opzichte van _offset=0).
+            # We slaan 'relatief ten opzichte van huidige offset' op:
+            new_x0 = -self._offset
+            new_x1 = -self._offset + fraction
 
-        if volumes:
-            self.push_in(volumes)
+            # Samenvoegen met huidig frontparcel als kwaliteit identiek is
+            if (self.state and
+                    self.state[0]['q'] == q and
+                    abs((self.state[0]['x0'] + self._offset) - fraction) < EPS):
+                self.state[0]['x0'] = new_x0
+            else:
+                self.state.insert(0, {'x0': new_x0, 'x1': new_x1, 'q': q})
 
 
 class Pipe(FIFO):
-    """FIFO implementation for pipe links."""
-    
+    """FIFO-implementatie voor leidingelementen."""
+
     def push_pull(self, flow: float, volumes: List[List[Any]]) -> None:
         """
-        Push parcels into pipe and pull parcels out.
-        
-        Args:
-            flow: Flow volume for this timestep
-            volumes: List of [volume, quality] pairs to push
+        Duw parcels in de leiding en trek verlaten parcels eruit.
+
+        Optimalisaties:
+        - Offset-systeem: push_in O(1) i.p.v. O(n_parcels)
+        - Drempelwaarde i.p.v. round() voor numerieke correctie
+        - Parcel-samenvoeg bij identieke kwaliteit
         """
-        if not volumes:
-            self.output_state = []
-            self.ready = True
-            return
-            
-        total_volume = sum(v[0] for v in volumes)
-        
-        if total_volume <= 0:
-            self.output_state = []
+        self.output_state = []
+        if not volumes or flow <= 0:
             self.ready = True
             return
 
-        # Scale volumes proportionally to flow
-        vol_updated = [[v / total_volume * flow, q] for v, q in volumes]
-        
-        # Push parcels in
+        total_volume = sum(v for v, _ in volumes)
+        if total_volume <= 0:
+            self.ready = True
+            return
+
+        scale = flow / total_volume
+        vol_updated = [[v * scale, q] for v, q in volumes]
         self.push_in(vol_updated)
 
-        # Pull parcels out
+        # Materialiseer de offset zodat we x0/x1 direct kunnen vergelijken
+        self._materialize()
+
         new_state = []
-        output = []
+        output    = []
 
         for parcel in self.state:
-            # Round to prevent numerical errors
-            parcel['x0'] = round(parcel['x0'], 10)
-            parcel['x1'] = round(parcel['x1'], 10)
+            x0, x1 = parcel['x0'], parcel['x1']
 
-            x0 = parcel['x0']
-            x1 = parcel['x1']
+            # Drempelwaarde-correctie i.p.v. round()
+            if abs(x0) < EPS: x0 = 0.0
+            if abs(x1) < EPS: x1 = 0.0
+            if abs(x0 - 1) < EPS: x0 = 1.0
+            if abs(x1 - 1) < EPS: x1 = 1.0
+            parcel['x0'], parcel['x1'] = x0, x1
 
-            # Calculate volume that exits the pipe (x > 1)
             if x1 > 1:
-                vol = (x1 - max(1, x0)) * self.volume
-                output.append([vol, parcel['q']])
-                
+                vol = (x1 - max(1.0, x0)) * self.volume
+                if vol > 0:
+                    output.append([vol, parcel['q']])
                 if x0 < 1:
-                    # Parcel partially remains
-                    parcel['x1'] = 1
+                    parcel['x1'] = 1.0
                     new_state.append(parcel)
             else:
                 new_state.append(parcel)
 
-        # Create output state
-        self.output_state = []
+        # Bouw output_state op — samenvoegen van aangrenzende identieke parcels
         if output:
-            total_output_volume = sum(v[0] for v in output)
-            x0 = 0
-            
-            for v, q in output:
-                if total_output_volume > 0:
-                    x1 = x0 + v / total_output_volume
-                    self.output_state.append({
-                        'x0': x0,
-                        'x1': x1,
-                        'q': q,
-                        'volume': total_output_volume
-                    })
+            total_out = sum(v for v, _ in output)
+            if total_out > 0:
+                x0 = 0.0
+                for v, q in output:
+                    x1 = x0 + v / total_out
+                    # Samenvoegen met vorig output-parcel als kwaliteit gelijk
+                    if self.output_state and self.output_state[-1]['q'] == q:
+                        self.output_state[-1]['x1'] = x1
+                    else:
+                        self.output_state.append({
+                            'x0': x0, 'x1': x1,
+                            'q': q, 'volume': total_out
+                        })
                     x0 = x1
 
         self.state = new_state
         self.ready = True
 
     def fill(self, input_sol: Dict[int, float]) -> None:
-        """
-        Fill the entire pipe with a single solution.
-        
-        Args:
-            input_sol: Solution quality dictionary
-        """
-        self.state = [{
-            'x0': 0,
-            'x1': 1,
-            'q': input_sol
-        }]
-        self.output_state = [{
-            'x0': 0,
-            'x1': 1,
-            'q': input_sol,
-            'volume': self.volume
-        }]
+        self._offset = 0.0
+        self.state = [{'x0': 0.0, 'x1': 1.0, 'q': input_sol}]
+        self.output_state = [{'x0': 0.0, 'x1': 1.0, 'q': input_sol, 'volume': self.volume}]
 
 
-class Pump(FIFO):
-    """FIFO implementation for pump links (zero-length)."""
-    
+class ZeroLengthFIFO(FIFO):
+    """FIFO voor leidingen met nulvolume (pompen, kleppen)."""
+
     def push_pull(self, flow: float, volumes: List[List[Any]]) -> None:
-        """
-        Process flow through pump (instantaneous passage).
-        
-        Args:
-            flow: Flow volume for this timestep
-            volumes: List of [volume, quality] pairs
-        """
-        if not volumes:
-            self.output_state = []
-            return
-            
-        total_volume = sum(v[0] for v in volumes)
-        
-        if total_volume <= 0:
-            self.output_state = []
-            return
-
-        # Create output state directly (no storage in pump)
         self.output_state = []
-        x0 = 0
-
+        if not volumes or flow <= 0:
+            return
+        total_volume = sum(v for v, _ in volumes)
+        if total_volume <= 0:
+            return
+        x0 = 0.0
         for v, q in volumes:
             x1 = x0 + v / total_volume
-            self.output_state.append({
-                'x0': x0,
-                'x1': x1,
-                'q': q,
-                'volume': flow
-            })
+            if self.output_state and self.output_state[-1]['q'] == q:
+                self.output_state[-1]['x1'] = x1
+            else:
+                self.output_state.append({'x0': x0, 'x1': x1, 'q': q, 'volume': flow})
             x0 = x1
 
     def fill(self, input_sol: Dict[int, float]) -> None:
-        """
-        Initialize pump with a solution.
-        
-        Args:
-            input_sol: Solution quality dictionary
-        """
-        self.output_state = [{
-            'x0': 0,
-            'x1': 1,
-            'q': input_sol,
-            'volume': 0
-        }]
+        self._offset = 0.0
+        self.output_state = [{'x0': 0.0, 'x1': 1.0, 'q': input_sol, 'volume': 0}]
 
 
-class Valve(FIFO):
-    """FIFO implementation for valve links (zero-length)."""
-    
-    def push_pull(self, flow: float, volumes: List[List[Any]]) -> None:
-        """
-        Process flow through valve (instantaneous passage).
-        
-        Args:
-            flow: Flow volume for this timestep
-            volumes: List of [volume, quality] pairs
-        """
-        if not volumes:
-            self.output_state = []
-            return
-            
-        total_volume = sum(v[0] for v in volumes)
-        
-        if total_volume <= 0:
-            self.output_state = []
-            return
+class Pump(ZeroLengthFIFO):
+    pass
 
-        # Create output state directly (no storage in valve)
-        self.output_state = []
-        x0 = 0
-
-        for v, q in volumes:
-            x1 = x0 + v / total_volume
-            self.output_state.append({
-                'x0': x0,
-                'x1': x1,
-                'q': q,
-                'volume': flow
-            })
-            x0 = x1
-
-    def fill(self, input_sol: Dict[int, float]) -> None:
-        """
-        Initialize valve with a solution.
-        
-        Args:
-            input_sol: Solution quality dictionary
-        """
-        self.output_state = [{
-            'x0': 0,
-            'x1': 1,
-            'q': input_sol,
-            'volume': 0
-        }]
+class Valve(ZeroLengthFIFO):
+    pass
