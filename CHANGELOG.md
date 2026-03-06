@@ -10,9 +10,37 @@ en dit project volgt [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Planned
 - Unit tests voor alle modules
 - Integration tests met EPyNet en PHREEQC
-- Performance optimalisaties voor grote netwerken
 - Ondersteuning voor meer tank modellen
 - Export functionaliteit naar CSV/Excel
+
+## [1.2.0] - 2026-03-06
+
+### Performance
+
+- **`Junction.mix()` gevectoriseerd** (`mix.py` v5)
+  - De dubbele Python-lus (boundary-cellen × parcels) is vervangen door een numpy-vectorisatie.
+  - Parcel-arrays `px0`, `px1` en `pvol` worden één keer per `mix()`-aanroep opgebouwd.
+  - De overlap per cel wordt berekend als één `np.minimum` / `np.maximum`-operatie over alle parcels tegelijk.
+  - Alleen de kwaliteitsaccumulatie (het `mixture`-dict) loopt nog in Python, uitsluitend over parcels met `mask=True` — het minimaal benodigde werk.
+  - Verwachte versnelling: **~3–5× sneller** voor drukke knooppunten met veel inkomende parcels.
+
+- **`PipeSegmentation._seg_fast()` volledig gevectoriseerd** (`segmentation.py` v3)
+  - Parcel-arrays en segmentgrenzen worden als numpy-arrays opgebouwd; de overlap per segment wordt berekend als een `(n_segs × n_parcels)`-matrixoperatie.
+  - Concentratie en SC worden gesommeerd met `(ov * pconc).sum(axis=1)` — geen Python-lus over segmenten of parcels meer.
+  - Voor een leiding met 100 segmenten en 20 parcels: van 2000 Python-iteraties naar één matrixoperatie.
+
+- **`PipeSegmentation._seg_phreeqc()` gevectoriseerd** (`segmentation.py` v3)
+  - Dezelfde overlap-matrixaanpak als `_seg_fast()`; PHREEQC-aanroepen via `quality.get_conc_pipe()` blijven ongewijzigd, maar de aggregatie per segment is nu volledig vectorised.
+
+- **`Quality.mix_cache_size` verhoogd van 256 naar 512** (`quality.py` v3)
+  - De LRU-cache voor PHREEQC-mengsels is verdubbeld.
+  - Grotere netwerken met meer unieke mengselcombinaties profiteren van minder cache-misses; de geheugenkosten zijn verwaarloosbaar.
+
+### Changed
+- `mix.py` versie 4 → 5
+- `segmentation.py` versie 2 → 3
+- `quality.py` versie 2 → 3
+- Versie gebumpt van 1.1.0 naar 1.2.0
 
 ## [1.1.0] - 2025-02-19
 
@@ -152,7 +180,7 @@ en dit project volgt [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Toekomstige Versies
 
-### [1.1.0] - Gepland
+### [1.2.0] - Gepland
 - [ ] Unit test suite
 - [ ] Integration tests
 - [ ] Performance benchmarks
@@ -161,7 +189,7 @@ en dit project volgt [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - [ ] Visualisatie tools
 - [ ] Parallel processing support
 
-### [1.2.0] - Gepland
+### [1.3.0] - Gepland
 - [ ] Real-time monitoring mode
 - [ ] Database integration
 - [ ] REST API
